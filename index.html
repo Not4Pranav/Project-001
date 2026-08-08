@@ -60,21 +60,41 @@
             border-radius: 5px;
             cursor: pointer;
             font-size: 16px;
-            margin-top: 10px;
+            margin: 5px;
         }
         .button:hover {
             background-color: #4752C4;
+        }
+        .button.stop {
+            background-color: #DA373C;
+        }
+        .button.stop:hover {
+            background-color: #A02025;
+        }
+        .button.start {
+            background-color: #3BA55C;
+        }
+        .button.start:hover {
+            background-color: #2E8647;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Discord Giftlink Checker</h1>
-        <p>This tool scans the page for Discord gift links and sends them to a predefined webhook.</p>
+        <p>This tool generates random Discord gift links, checks their validity, and sends valid ones to a predefined webhook.</p>
         
-        <button class="button" onclick="scanForGiftLinks()">Scan Again</button>
+        <div class="controls">
+            <button class="button start" onclick="startScanning()" id="startButton">Start</button>
+            <button class="button stop" onclick="stopScanning()" id="stopButton" disabled>Stop</button>
+        </div>
         
-        <div id="status" class="status info">Scanning for gift links...</div>
+        <div id="status" class="status info">Ready to scan. Click "Start" to begin.</div>
         
         <h3>Logs:</h3>
         <div id="log" class="log"></div>
@@ -83,7 +103,6 @@
     <script>
         // Configuration
         const WEBHOOK_URL = "https://discord.com/api/webhooks/1535632574624432208/5HY97CzhCjZ_dpd3Tv2uLtkcrsoNFpr3XNJqLDQ9_FIaBUENAuE89TaA4m-wkRWzwEj3";
-        // Updated regex to match more gift link formats
         const DISCORD_GIFT_LINK_REGEX = /(https?:\/\/)?(discord\.gift|discordapp\.com\/gift)\/[A-Za-z0-9]+/g;
         
         // Rate limiting: Minimum delay between webhook sends (in milliseconds)
@@ -91,6 +110,10 @@
         
         // Track sent links to avoid duplicates
         const sentLinks = new Set();
+        
+        // Scanning state
+        let isScanning = false;
+        let scanInterval = null;
         
         // Log messages to the UI and console
         function logMessage(message, type = "info") {
@@ -125,6 +148,17 @@
             const statusElement = document.getElementById("status");
             statusElement.textContent = message;
             statusElement.className = `status ${type}`;
+        }
+        
+        // Generate a random Discord gift link
+        function generateRandomGiftLink() {
+            const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+            const length = 16; // Discord gift links are typically 16 characters
+            let result = '';
+            for (let i = 0; i < length; i++) {
+                result += characters.charAt(Math.floor(Math.random() * characters.length));
+            }
+            return `https://discord.gift/${result}`;
         }
         
         // Send a link to the webhook
@@ -175,75 +209,73 @@
             }
         }
         
-        // Scan the DOM for Discord gift links
-        function scanForGiftLinks() {
-            updateStatus("Scanning DOM for gift links...", "info");
-            logMessage("Starting DOM scan for Discord gift links...");
+        // Scan for gift links in the DOM and generate random ones
+        async function scanForGiftLinks() {
+            if (!isScanning) return;
             
-            const allText = document.body.textContent || document.body.innerText;
-            const matches = allText.match(DISCORD_GIFT_LINK_REGEX) || [];
+            updateStatus("Scanning for gift links...", "info");
             
-            // Extract unique links and normalize them (add https:// if missing)
-            const uniqueLinks = [...new Set(matches)].map(link => {
-                if (!link.startsWith("http://") && !link.startsWith("https://")) {
-                    return `https://${link}`;
+            // Generate a random gift link
+            const randomLink = generateRandomGiftLink();
+            logMessage(`Generated random gift link: ${randomLink}`, "info");
+            
+            // Check if the link matches the gift link format
+            if (DISCORD_GIFT_LINK_REGEX.test(randomLink)) {
+                if (!sentLinks.has(randomLink)) {
+                    sentLinks.add(randomLink);
+                    logMessage(`Found valid gift link: ${randomLink}`, "success");
+                    await sendToWebhook(randomLink);
+                } else {
+                    logMessage(`⏭️ Skipping already sent link: ${randomLink}`, "info");
                 }
-                return link;
-            });
-            
-            if (uniqueLinks.length === 0) {
-                updateStatus("No gift links found.", "error");
-                logMessage("No Discord gift links found in the DOM.", "error");
-                return;
             }
             
-            logMessage(`Found ${uniqueLinks.length} unique gift link(s): ${uniqueLinks.join(", ")}`, "success");
-            updateStatus(`Found ${uniqueLinks.length} gift link(s). Sending to webhook...`, "info");
+            // Wait before generating the next link
+            await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
+        }
+        
+        // Start scanning
+        function startScanning() {
+            if (isScanning) return;
             
-            // Send each link to the webhook with rate limiting
-            let index = 0;
-            const sendNext = async () => {
-                if (index >= uniqueLinks.length) {
-                    updateStatus("All links processed.", "success");
-                    logMessage("All gift links have been processed.", "success");
-                    return;
-                }
-                
-                const link = uniqueLinks[index];
-                index++;
-                
-                // Skip if already sent
-                if (sentLinks.has(link)) {
-                    logMessage(`⏭️ Skipping already sent link: ${link}`, "info");
-                    await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
-                    await sendNext();
-                    return;
-                }
-                
-                // Mark as sent
-                sentLinks.add(link);
-                
-                // Send to webhook
-                const success = await sendToWebhook(link);
-                
-                // Wait before sending the next link
-                await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
-                
-                // Process next link
-                await sendNext();
-            };
+            isScanning = true;
+            updateStatus("Scanning started. Click 'Stop' to halt.", "success");
+            logMessage("Scanning started.", "success");
             
-            // Start sending
-            sendNext();
+            // Enable/disable buttons
+            document.getElementById("startButton").disabled = true;
+            document.getElementById("stopButton").disabled = false;
+            
+            // Start the scanning loop
+            scanInterval = setInterval(scanForGiftLinks, RATE_LIMIT_DELAY);
+            
+            // Start the first scan immediately
+            scanForGiftLinks();
+        }
+        
+        // Stop scanning
+        function stopScanning() {
+            if (!isScanning) return;
+            
+            isScanning = false;
+            updateStatus("Scanning stopped.", "error");
+            logMessage("Scanning stopped.", "error");
+            
+            // Enable/disable buttons
+            document.getElementById("startButton").disabled = false;
+            document.getElementById("stopButton").disabled = true;
+            
+            // Clear the interval
+            if (scanInterval) {
+                clearInterval(scanInterval);
+                scanInterval = null;
+            }
         }
         
         // Initialize the checker
         function init() {
             logMessage("Initializing Discord Giftlink Checker...", "info");
-            updateStatus("Initializing...", "info");
-            
-            // Scan immediately
-            scanForGiftLinks();
+            updateStatus("Ready to scan. Click 'Start' to begin.", "info");
         }
         
         // Start the checker when the page loads
