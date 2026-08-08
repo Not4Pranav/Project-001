@@ -3,7 +3,6 @@
 <head>
     <meta charset="UTF-8">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-    <base href="/">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Discord Giftlink Checker</title>
     <style>
@@ -217,26 +216,6 @@
             sendNext();
         }
         
-        // Scan for links in dynamically loaded content (e.g., AJAX, SPAs)
-        function setupMutationObserver() {
-            const observer = new MutationObserver((mutations) => {
-                mutations.forEach((mutation) => {
-                    if (mutation.addedNodes.length > 0) {
-                        logMessage("New DOM nodes detected. Rescanning for gift links...", "info");
-                        scanForGiftLinks();
-                    }
-                });
-            });
-            
-            observer.observe(document.body, {
-                childList: true,
-                subtree: true,
-                characterData: true
-            });
-            
-            logMessage("MutationObserver set up to detect dynamically loaded content.", "info");
-        }
-        
         // Initialize the checker
         function init() {
             logMessage("Initializing Discord Giftlink Checker...", "info");
@@ -244,15 +223,6 @@
             
             // Scan immediately
             scanForGiftLinks();
-            
-            // Set up observer for dynamic content
-            setupMutationObserver();
-            
-            // Periodically rescan (every 10 seconds)
-            setInterval(() => {
-                logMessage("Periodic rescan for gift links...", "info");
-                scanForGiftLinks();
-            }, 10000);
         }
         
         // Start the checker when the page loads
