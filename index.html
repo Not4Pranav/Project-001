@@ -737,7 +737,8 @@ AbCdEf1234567890"></textarea>
             startedAt: 0,
             timerId: null,
             usingDirectFile: false,
-            approximateInputRows: 0
+            approximateInputRows: 0,
+            selectedFilePreviewOnly: false
         };
 
         function clampInt(value, min, max, fallback) {
@@ -955,6 +956,9 @@ AbCdEf1234567890"></textarea>
             state.startedAt = 0;
             state.usingDirectFile = false;
             state.approximateInputRows = 0;
+            if (clearFile) {
+                state.selectedFilePreviewOnly = false;
+            }
             stopStatsTimer();
 
             if (!keepInput) {
@@ -1181,11 +1185,12 @@ AbCdEf1234567890"></textarea>
             const previewLimit = 512 * 1024;
             const previewText = await file.slice(0, previewLimit).text();
             const isLarge = file.size > previewLimit;
+            state.selectedFilePreviewOnly = isLarge;
             elements.inputLinks.value = isLarge
-                ? `${previewText}\n\n[Preview only for large file. Processing can stream the full uploaded file directly.]`
+                ? `${previewText}\n\n[Preview only for large file. Keep streaming enabled to process the whole file without loading it fully into the textarea.]`
                 : previewText;
             state.approximateInputRows = previewText.split(/\r?\n/).filter(Boolean).length;
-            elements.fileMeta.textContent = `Loaded file: ${file.name}\nSize: ${file.size.toLocaleString()} bytes\nPreview rows: about ${state.approximateInputRows.toLocaleString()}${isLarge ? '+' : ''}\nMode: ${isLarge ? 'preview shown, full file can be streamed directly' : 'full content loaded'}`;
+            elements.fileMeta.textContent = `Loaded file: ${file.name}\nSize: ${file.size.toLocaleString()} bytes\nPreview rows: about ${state.approximateInputRows.toLocaleString()}${isLarge ? '+' : ''}\nMode: ${isLarge ? 'preview shown, full file can be streamed directly or fully loaded if you disable streaming' : 'full content loaded'}`;
             await inspectCsvColumnsFromText(previewText);
             updateEngineHint();
             saveSettingsToStorage();
@@ -1604,8 +1609,45 @@ AbCdEf1234567890"></textarea>
             if (state.isRunning) return;
 
             const settings = readSettings();
+            let useDirectFile = Boolean(state.selectedFile && settings.streamFile);
+
+            if (settings.webhookEnabled) {
+                if (!settings.webhookUrl) {
+                    setStatus('Webhook is enabled but no HTTPS webhook URL was provided.', 'error');
+                    log('Start blocked: webhook delivery was enabled without a URL.', 'error');
+                    return;
+                }
+                try {
+                    const parsedWebhookUrl = new URL(settings.webhookUrl);
+                    if (parsedWebhookUrl.protocol !== 'https:') {
+                        throw new Error('Webhook URL must use HTTPS.');
+                    }
+                } catch (error) {
+                    setStatus(error.message || 'Webhook URL is invalid.', 'error');
+                    log(error.message || 'Webhook URL is invalid.', 'error');
+                    return;
+                }
+            }
+
+            if (state.selectedFile && !useDirectFile && state.selectedFilePreviewOnly) {
+                try {
+                    setStatus('Loading full uploaded file into browser memory because streaming is off...', 'running');
+                    log('Streaming is disabled for a large uploaded file, so the full file is being loaded into memory before processing.', 'warning');
+                    const fullText = await state.selectedFile.text();
+                    elements.inputLinks.value = fullText;
+                    state.selectedFilePreviewOnly = false;
+                    state.approximateInputRows = fullText.split(/\r?\n/).filter(Boolean).length;
+                    elements.fileMeta.textContent = `Loaded file: ${state.selectedFile.name}\nSize: ${state.selectedFile.size.toLocaleString()} bytes\nRows loaded into browser memory: about ${state.approximateInputRows.toLocaleString()}\nMode: full content loaded for non-stream processing`;
+                    await inspectCsvColumnsFromText(fullText.slice(0, 50000));
+                } catch (error) {
+                    setStatus(error.message || 'Could not load the full uploaded file.', 'error');
+                    log(error.message || 'Could not load the full uploaded file.', 'error');
+                    return;
+                }
+            }
+
             const hasManualInput = Boolean(elements.inputLinks.value.trim());
-            const useDirectFile = Boolean(state.selectedFile && settings.streamFile);
+            useDirectFile = Boolean(state.selectedFile && settings.streamFile);
             if (!useDirectFile && !hasManualInput) {
                 setStatus('Please upload a file or paste at least one owned gift link or code before starting.', 'error');
                 log('Start blocked: no input rows found.', 'error');
@@ -1804,6 +1846,7 @@ AbCdEf1234567890"></textarea>
                 'https://discord.gift/AbCdEf1234567890'
             ].join('\n');
             state.selectedFile = null;
+            state.selectedFilePreviewOnly = false;
             elements.fileInput.value = '';
             elements.fileMeta.textContent = 'Using built-in sample data.';
             elements.inputLinks.value = sample;
@@ -1816,6 +1859,7 @@ AbCdEf1234567890"></textarea>
 
         elements.clearBtn.addEventListener('click', () => {
             state.selectedFile = null;
+            state.selectedFilePreviewOnly = false;
             elements.inputLinks.value = '';
             elements.fileInput.value = '';
             elements.fileMeta.textContent = 'No file loaded yet.';

@@ -2,6 +2,10 @@
 
 Safe local-only processor for files you provide.
 
+See also:
+- `../README.md` for project overview
+- `../SETUP.md` for local setup and validation scripts
+
 ## What it does
 - streams large input files
 - supports line-based, CSV, gzipped, stdin, and directory batch input
@@ -33,6 +37,21 @@ Safe local-only processor for files you provide.
 ```bash
 npm run check:file -- --input ./codes.txt --profile turbo --output-dir ./output/run-1
 ```
+
+## Built-in repo scripts
+
+```bash
+npm run check:file:help
+npm run check:cli
+npm run check:browser
+npm run check:all
+npm run benchmark:cli -- --rows 1000000 --files 4 --workers 8 --profile turbo
+```
+
+The benchmark helper compares:
+- single-file mode
+- directory mode with `--process-mode inline`
+- directory mode with `--process-mode child`
 
 ## Gzipped input
 
@@ -152,6 +171,8 @@ This creates one subdirectory per input file plus:
 - `batch-summary.json`
 - `batch-summary.csv`
 
+Directory mode now keeps the parent batch log readable by showing one overall batch progress stream plus per-file start/done summaries instead of noisy nested phase logs for every file.
+
 By default, directory mode auto-picks inline vs child-process execution. You can force child-process fan-out on stronger machines:
 
 ```bash
@@ -209,7 +230,7 @@ npm run check:file -- \
 - `summary.json` (includes per-phase timing breakdown)
 - `checkpoint.json`
 - `batch-summary.json` in directory mode
-- `batch-summary.csv` in directory mode
+- `batch-summary.csv` in directory mode, including per-file phase timing columns
 
 ## Notes for large files
 - Use `--profile turbo` for stronger CPUs.
@@ -224,3 +245,4 @@ npm run check:file -- \
 - Use `--gzip-output true` when disk space matters more than CPU time.
 - Webhook delivery time depends on network and the receiving server.
 - Resume checkpoints currently resume completed major phases rather than byte-perfect mid-line recovery.
+- If `--resume` is used without an existing checkpoint file, the CLI now fails with a clearer checkpoint-not-found message.

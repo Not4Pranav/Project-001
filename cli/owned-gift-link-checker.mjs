@@ -78,6 +78,7 @@ Outputs:
   <output-dir>/summary.json
   <output-dir>/checkpoint.json
   <output-dir>/batch-summary.json (directory mode)
+  <output-dir>/batch-summary.csv (directory mode)
 `);
 }
 
@@ -1624,7 +1625,14 @@ async function processSingleInput(settings) {
 
   let checkpoint = null;
   if (settings.resume) {
-    checkpoint = await loadCheckpoint(settings.checkpointFile);
+    try {
+      checkpoint = await loadCheckpoint(settings.checkpointFile);
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        throw new Error(`Resume requested but checkpoint was not found: ${settings.checkpointFile}`);
+      }
+      throw error;
+    }
     validateResumeCompatibility(settings, checkpoint);
     Object.assign(stats, checkpoint.stats || {});
     stats.startedAt = Date.now();
@@ -1725,9 +1733,10 @@ async function processDirectory(settings) {
       }, logger.useProgress ? 250 : 5000);
 
   const runSingleJob = async (jobSettings) => {
+    const quietJobSettings = { ...jobSettings, quiet: true };
     return processModeResolved === 'child'
-      ? runChildSingleInput({ ...jobSettings, quiet: true })
-      : processSingleInput(jobSettings);
+      ? runChildSingleInput(quietJobSettings)
+      : processSingleInput(quietJobSettings);
   };
 
   const runSlot = async (slot) => {
@@ -1762,6 +1771,7 @@ async function processDirectory(settings) {
       batchValid += summary.stats.validUnique;
       batchDuplicates += summary.stats.duplicates;
       batchInvalid += summary.stats.invalid;
+      logger.info(`batch ${index + 1}/${files.length} done: processed=${summary.stats.processed.toLocaleString()} valid=${summary.stats.validUnique.toLocaleString()} dup=${summary.stats.duplicates.toLocaleString()} invalid=${summary.stats.invalid.toLocaleString()} | phase timings ${summary.stats.phaseTimings.partitionHuman}/${summary.stats.phaseTimings.dedupeHuman}/${summary.stats.phaseTimings.webhookHuman}`);
     }
   };
 
