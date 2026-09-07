@@ -30,11 +30,13 @@ and can optionally send batches of your provided format-valid entries to a webho
 Usage:
   node cli/owned-gift-link-checker.mjs --input ./codes.txt [options]
   node cli/owned-gift-link-checker.mjs --input ./codes.txt.gz --gzip auto [options]
+  node cli/owned-gift-link-checker.mjs --input-dir ./incoming [options]
   cat ./codes.txt | node cli/owned-gift-link-checker.mjs --stdin [options]
   npm run check:file -- --input ./codes.txt [options]
 
 Required:
   --input, -i <path>               Path to input file
+  --input-dir <path>               Process all regular files in a directory tree
   --stdin                          Read input from stdin instead of a file
 
 Optional:
@@ -45,6 +47,8 @@ Optional:
   --column <auto|index|name>       CSV column to inspect (default: auto)
   --header <true|false>            CSV first row is header (default: true)
   --gzip <auto|true|false>         Gzip input handling (default: auto)
+  --gzip-output <true|false>       Compress result outputs as .gz (default: false)
+  --output-format <txt|jsonl|both> Result output format(s) (default: txt)
   --workers <n>                    Worker threads (default from profile)
   --chunk-size <n>                 Rows per worker batch (default from profile)
   --buckets <n>                    Temp dedupe partitions (default from profile)
@@ -59,11 +63,12 @@ Optional:
   --help                           Show this help
 
 Outputs:
-  <output-dir>/valid.txt or valid-0001.txt, valid-0002.txt, ...
-  <output-dir>/duplicates.txt or duplicates-0001.txt, duplicates-0002.txt, ...
-  <output-dir>/invalid.txt or invalid-0001.txt, invalid-0002.txt, ...
+  <output-dir>/valid*.txt or valid*.jsonl (optionally .gz)
+  <output-dir>/duplicates*.txt or duplicates*.jsonl (optionally .gz)
+  <output-dir>/invalid*.txt or invalid*.jsonl (optionally .gz)
   <output-dir>/summary.json
   <output-dir>/checkpoint.json
+  <output-dir>/batch-summary.json (directory mode)
 `);
 }
 
@@ -75,10 +80,13 @@ function parseArgs(argv) {
     column: 'auto',
     header: true,
     gzip: 'auto',
+    gzipOutput: false,
+    outputFormat: 'txt',
     outputDir: path.resolve(process.cwd(), 'output'),
     checkpointFile: null,
     resume: false,
     stdin: false,
+    inputDir: null,
     shardSize: 0,
     quiet: false,
     keepTemp: false,
@@ -100,6 +108,10 @@ function parseArgs(argv) {
         break;
       case '--stdin':
         args.stdin = true;
+        break;
+      case '--input-dir':
+        args.inputDir = path.resolve(process.cwd(), next);
+        index += 1;
         break;
       case '--output-dir':
       case '-o':
@@ -128,6 +140,14 @@ function parseArgs(argv) {
         break;
       case '--gzip':
         args.gzip = next;
+        index += 1;
+        break;
+      case '--gzip-output':
+        args.gzipOutput = parseBoolean(next, false);
+        index += 1;
+        break;
+      case '--output-format':
+        args.outputFormat = next;
         index += 1;
         break;
       case '--workers':
@@ -212,13 +232,15 @@ function resolveSettings(rawArgs) {
 
   const profile = PROFILES[rawArgs.profile];
   const stdin = rawArgs.stdin || rawArgs.input === '-';
+  const inputDir = rawArgs.inputDir ? path.resolve(process.cwd(), rawArgs.inputDir) : null;
   const input = stdin ? null : rawArgs.input ? path.resolve(process.cwd(), rawArgs.input) : undefined;
   const checkpointFile = rawArgs.checkpointFile || path.join(rawArgs.outputDir, 'checkpoint.json');
   const settings = {
     ...rawArgs,
     stdin,
+    inputDir,
     input,
-    inputLabel: stdin ? 'stdin' : input,
+    inputLabel: stdin ? 'stdin' : inputDir || input,
     checkpointFile,
     gzip: resolveGzipMode(rawArgs.gzip),
     workers: clampInt(rawArgs.workers, 1, 32, profile.workers),
@@ -229,8 +251,8 @@ function resolveSettings(rawArgs) {
     shardSize: clampInt(rawArgs.shardSize, 0, 5_000_000, 0),
   };
 
-  if (!settings.stdin && !settings.input) {
-    throw new Error('Missing required --input path or --stdin');
+  if ([settings.stdin, Boolean(settings.input), Boolean(settings.inputDir)].filter(Boolean).length !== 1) {
+    throw new Error('Use exactly one of --input, --input-dir, or --stdin');
   }
 
   if (!['auto', 'lines', 'csv'].includes(settings.format)) {
@@ -239,6 +261,14 @@ function resolveSettings(rawArgs) {
 
   if (!['auto', ',', ';', 'tab', 'pipe'].includes(settings.delimiter)) {
     throw new Error(`Invalid --delimiter: ${settings.delimiter}`);
+  }
+
+  if (!['txt', 'jsonl', 'both'].includes(settings.outputFormat)) {
+    throw new Error(`Invalid --output-format: ${settings.outputFormat}`);
+  }
+
+  if (settings.resume && settings.stdin) {
+    throw new Error('--resume is not supported with --stdin');
   }
 
   if (settings.webhookUrl) {
@@ -453,39 +483,70 @@ async function endStream(stream) {
 }
 
 class ShardedLineWriter {
-  constructor(outputDir, baseName, shardSize = 0) {
+  constructor(outputDir, baseName, shardSize = 0, options = {}) {
     this.outputDir = outputDir;
     this.baseName = baseName;
     this.shardSize = shardSize;
+    this.extension = options.extension || 'txt';
+    this.gzipOutput = Boolean(options.gzipOutput);
+    this.serializer = options.serializer || ((value) => String(value));
     this.files = [];
     this.currentStream = null;
+    this.currentFileStream = null;
     this.currentLines = 0;
     this.currentIndex = 0;
   }
 
   nextFilePath() {
-    if (!this.shardSize) {
-      return path.join(this.outputDir, `${this.baseName}.txt`);
-    }
-    const suffix = String(this.currentIndex + 1).padStart(4, '0');
-    return path.join(this.outputDir, `${this.baseName}-${suffix}.txt`);
+    const suffix = this.shardSize ? `-${String(this.currentIndex + 1).padStart(4, '0')}` : '';
+    const fileName = `${this.baseName}${suffix}.${this.extension}`;
+    return path.join(this.outputDir, this.gzipOutput ? `${fileName}.gz` : fileName);
   }
 
   async ensureStream() {
     if (this.currentStream) return;
     const filePath = this.nextFilePath();
-    const stream = fs.createWriteStream(filePath, { flags: 'w' });
-    stream.setMaxListeners(0);
-    this.currentStream = stream;
+    const fileStream = fs.createWriteStream(filePath, { flags: 'w' });
+    fileStream.setMaxListeners(0);
+
+    if (this.gzipOutput) {
+      const gzipStream = zlib.createGzip();
+      gzipStream.setMaxListeners(0);
+      gzipStream.pipe(fileStream);
+      this.currentStream = gzipStream;
+      this.currentFileStream = fileStream;
+    } else {
+      this.currentStream = fileStream;
+      this.currentFileStream = fileStream;
+    }
+
     this.files.push(filePath);
     this.currentIndex += 1;
     this.currentLines = 0;
   }
 
+  async closeCurrentStream() {
+    if (!this.currentStream) return;
+    const writable = this.currentStream;
+    const fileStream = this.currentFileStream;
+    this.currentStream = null;
+    this.currentFileStream = null;
+
+    await new Promise((resolve, reject) => {
+      writable.once('error', reject);
+      writable.end();
+      if (fileStream && fileStream !== writable) {
+        fileStream.once('error', reject);
+        fileStream.once('close', resolve);
+      } else {
+        writable.once('close', resolve);
+      }
+    });
+  }
+
   async rotateIfNeeded() {
     if (!this.shardSize || this.currentLines < this.shardSize) return;
-    await endStream(this.currentStream);
-    this.currentStream = null;
+    await this.closeCurrentStream();
   }
 
   async writeLines(lines) {
@@ -494,7 +555,7 @@ class ShardedLineWriter {
     if (!this.shardSize) {
       await this.ensureStream();
       this.currentLines += lines.length;
-      await writeLines(this.currentStream, lines);
+      await writeLines(this.currentStream, lines.map(this.serializer));
       return;
     }
 
@@ -505,16 +566,54 @@ class ShardedLineWriter {
       const slice = lines.slice(offset, offset + remaining);
       this.currentLines += slice.length;
       offset += slice.length;
-      await writeLines(this.currentStream, slice);
+      await writeLines(this.currentStream, slice.map(this.serializer));
       await this.rotateIfNeeded();
     }
   }
 
   async close() {
-    if (!this.currentStream) return;
-    await endStream(this.currentStream);
-    this.currentStream = null;
+    await this.closeCurrentStream();
   }
+}
+
+function escapeJsonLineEntry(value) {
+  return JSON.stringify({ entry: value });
+}
+
+function createCategoryWriters(settings, outputDir, baseName) {
+  const writers = [];
+  if (settings.outputFormat === 'txt' || settings.outputFormat === 'both') {
+    writers.push(new ShardedLineWriter(outputDir, baseName, settings.shardSize, {
+      extension: 'txt',
+      gzipOutput: settings.gzipOutput,
+      serializer: (value) => String(value),
+    }));
+  }
+  if (settings.outputFormat === 'jsonl' || settings.outputFormat === 'both') {
+    writers.push(new ShardedLineWriter(outputDir, baseName, settings.shardSize, {
+      extension: 'jsonl',
+      gzipOutput: settings.gzipOutput,
+      serializer: escapeJsonLineEntry,
+    }));
+  }
+  return writers;
+}
+
+async function writeToAllWriters(writers, lines) {
+  await Promise.all(writers.map((writer) => writer.writeLines(lines)));
+}
+
+async function closeAllWriters(writers) {
+  await Promise.all(writers.map((writer) => writer.close()));
+}
+
+function getWriterFileGroups(writers) {
+  const output = {};
+  for (const writer of writers) {
+    const key = writer.extension === 'txt' ? 'txtFiles' : `${writer.extension}Files`;
+    output[key] = writer.files.slice();
+  }
+  return output;
 }
 
 class WorkerPool {
@@ -584,15 +683,9 @@ class WorkerPool {
   }
 }
 
-function createInputStream(settings) {
-  const rawStream = settings.stdin
-    ? process.stdin
-    : fs.createReadStream(settings.input);
-
-  const shouldGunzip = settings.gzip === true
-    || (settings.gzip === 'auto' && !settings.stdin && settings.input.toLowerCase().endsWith('.gz'));
-
-  const stream = shouldGunzip
+function createTextReadStream(filePath) {
+  const rawStream = fs.createReadStream(filePath);
+  const stream = filePath.toLowerCase().endsWith('.gz')
     ? rawStream.pipe(zlib.createGunzip())
     : rawStream;
 
@@ -603,17 +696,59 @@ function createInputStream(settings) {
   return stream;
 }
 
+function createInputStream(settings) {
+  if (settings.stdin) {
+    const shouldGunzip = settings.gzip === true;
+    const stream = shouldGunzip
+      ? process.stdin.pipe(zlib.createGunzip())
+      : process.stdin;
+    if (typeof stream.setEncoding === 'function') {
+      stream.setEncoding('utf8');
+    }
+    return {
+      stream,
+      progressBytesReader: null,
+      totalBytes: null,
+    };
+  }
+
+  const rawStream = fs.createReadStream(settings.input);
+  const shouldGunzip = settings.gzip === true
+    || (settings.gzip === 'auto' && settings.input.toLowerCase().endsWith('.gz'));
+
+  const stream = shouldGunzip
+    ? rawStream.pipe(zlib.createGunzip())
+    : rawStream;
+
+  if (typeof stream.setEncoding === 'function') {
+    stream.setEncoding('utf8');
+  }
+
+  return {
+    stream,
+    progressBytesReader: () => rawStream.bytesRead || 0,
+    totalBytes: settings.inputSize || null,
+  };
+}
+
 function buildOutputFiles(settings) {
   return {
     outputDir: settings.outputDir,
     summary: path.join(settings.outputDir, 'summary.json'),
     checkpoint: settings.checkpointFile,
-    valid: path.join(settings.outputDir, settings.shardSize ? 'valid-0001.txt' : 'valid.txt'),
-    duplicates: path.join(settings.outputDir, settings.shardSize ? 'duplicates-0001.txt' : 'duplicates.txt'),
-    invalid: path.join(settings.outputDir, settings.shardSize ? 'invalid-0001.txt' : 'invalid.txt'),
+    batchSummary: path.join(settings.outputDir, 'batch-summary.json'),
+    valid: null,
+    duplicates: null,
+    invalid: null,
     validFiles: [],
     duplicateFiles: [],
     invalidFiles: [],
+    validTxtFiles: [],
+    validJsonlFiles: [],
+    duplicateTxtFiles: [],
+    duplicateJsonlFiles: [],
+    invalidTxtFiles: [],
+    invalidJsonlFiles: [],
   };
 }
 
@@ -637,12 +772,15 @@ function buildCheckpointPayload(phase, settings, stats, outputFiles, extra = {})
     settings: {
       inputLabel: settings.inputLabel,
       stdin: settings.stdin,
+      inputDir: settings.inputDir,
       profile: settings.profile,
       format: settings.format,
       delimiter: settings.delimiter,
       column: settings.column,
       header: settings.header,
       gzip: settings.gzip,
+      gzipOutput: settings.gzipOutput,
+      outputFormat: settings.outputFormat,
       workers: settings.workers,
       chunkSize: settings.chunkSize,
       buckets: settings.buckets,
@@ -682,10 +820,14 @@ function normalizeResumedState(checkpoint, stats, outputFiles) {
     stats.duplicates = 0;
     stats.webhookDeliveries = 0;
     stats.webhookFailures = 0;
+    outputFiles.valid = null;
+    outputFiles.duplicates = null;
     outputFiles.validFiles = [];
     outputFiles.duplicateFiles = [];
-    outputFiles.valid = path.join(outputFiles.outputDir, checkpoint.settings.shardSize ? 'valid-0001.txt' : 'valid.txt');
-    outputFiles.duplicates = path.join(outputFiles.outputDir, checkpoint.settings.shardSize ? 'duplicates-0001.txt' : 'duplicates.txt');
+    outputFiles.validTxtFiles = [];
+    outputFiles.validJsonlFiles = [];
+    outputFiles.duplicateTxtFiles = [];
+    outputFiles.duplicateJsonlFiles = [];
   } else if (phase === 'phase2-complete') {
     stats.webhookDeliveries = 0;
     stats.webhookFailures = 0;
@@ -697,7 +839,7 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
   stats.tempDir = tempDir;
   await ensureDir(tempDir);
 
-  const invalidWriter = new ShardedLineWriter(outputFiles.outputDir, 'invalid', settings.shardSize);
+  const invalidWriters = createCategoryWriters(settings, outputFiles.outputDir, 'invalid');
   const bucketStreams = Array.from({ length: settings.buckets }, (_, index) => {
     const bucketPath = path.join(tempDir, `bucket-${String(index).padStart(4, '0')}.txt`);
     const stream = fs.createWriteStream(bucketPath, { flags: 'w' });
@@ -710,8 +852,9 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
   const pool = new WorkerPool(workerFile, settings.workers);
   await pool.init();
 
+  const inputHandle = createInputStream(settings);
   const rl = readline.createInterface({
-    input: createInputStream(settings),
+    input: inputHandle.stream,
     crlfDelay: Infinity,
   });
 
@@ -724,7 +867,7 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
     stats.invalid += Array.isArray(result.invalid) ? result.invalid.length : 0;
 
     if (Array.isArray(result.invalid) && result.invalid.length) {
-      await invalidWriter.writeLines(result.invalid);
+      await writeToAllWriters(invalidWriters, result.invalid);
     }
 
     if (Array.isArray(result.valid) && result.valid.length) {
@@ -760,7 +903,16 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
   const progressTimer = settings.quiet
     ? null
     : setInterval(() => {
-        logger.info(`phase 1: processed ${stats.processed.toLocaleString()} rows at ~${rowsPerMinute(stats.processed, stats).toLocaleString()} rows/min`);
+        const rpm = rowsPerMinute(stats.processed, stats).toLocaleString();
+        const bytesRead = inputHandle.progressBytesReader ? inputHandle.progressBytesReader() : 0;
+        if (inputHandle.totalBytes) {
+          const ratio = Math.max(0, Math.min(1, bytesRead / inputHandle.totalBytes));
+          const elapsedMs = getElapsedMs(stats);
+          const etaMs = ratio > 0 ? Math.max(0, Math.round((elapsedMs / ratio) - elapsedMs)) : 0;
+          logger.info(`phase 1: processed ${stats.processed.toLocaleString()} rows at ~${rpm} rows/min | ${(ratio * 100).toFixed(1)}% input read | eta ${humanDuration(etaMs)}`);
+        } else {
+          logger.info(`phase 1: processed ${stats.processed.toLocaleString()} rows at ~${rpm} rows/min`);
+        }
       }, 5000);
 
   try {
@@ -773,7 +925,7 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
         stats.totalRows += 1;
         stats.processed += 1;
         stats.invalid += 1;
-        await invalidWriter.writeLines([resolved.invalid]);
+        await writeToAllWriters(invalidWriters, [resolved.invalid]);
       } else if (resolved.row) {
         stats.totalRows += 1;
         candidateChunk.push(resolved.row);
@@ -789,14 +941,18 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
     if (progressTimer) clearInterval(progressTimer);
     rl.close();
     await pool.destroy();
-    await invalidWriter.close();
+    await closeAllWriters(invalidWriters);
     for (const bucket of bucketStreams) {
       await endStream(bucket.stream);
     }
   }
 
-  outputFiles.invalidFiles = invalidWriter.files.slice();
-  if (outputFiles.invalidFiles[0]) outputFiles.invalid = outputFiles.invalidFiles[0];
+  const invalidGroups = getWriterFileGroups(invalidWriters);
+  outputFiles.invalidTxtFiles = invalidGroups.txtFiles || [];
+  outputFiles.invalidJsonlFiles = invalidGroups.jsonlFiles || [];
+  outputFiles.invalidFiles = [...outputFiles.invalidTxtFiles, ...outputFiles.invalidJsonlFiles];
+  if (outputFiles.invalidTxtFiles[0]) outputFiles.invalid = outputFiles.invalidTxtFiles[0];
+  else if (outputFiles.invalidJsonlFiles[0]) outputFiles.invalid = outputFiles.invalidJsonlFiles[0];
 
   return {
     tempDir,
@@ -806,8 +962,8 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
 }
 
 async function phaseTwoDedupe(settings, logger, stats, tempInfo, outputFiles) {
-  const validWriter = new ShardedLineWriter(outputFiles.outputDir, 'valid', settings.shardSize);
-  const duplicateWriter = new ShardedLineWriter(outputFiles.outputDir, 'duplicates', settings.shardSize);
+  const validWriters = createCategoryWriters(settings, outputFiles.outputDir, 'valid');
+  const duplicateWriters = createCategoryWriters(settings, outputFiles.outputDir, 'duplicates');
 
   try {
     for (let index = 0; index < tempInfo.bucketFiles.length; index += 1) {
@@ -822,10 +978,10 @@ async function phaseTwoDedupe(settings, logger, stats, tempInfo, outputFiles) {
       const duplicateBatch = [];
       const flushIfNeeded = async (force = false) => {
         if (force || validBatch.length >= 5000) {
-          await validWriter.writeLines(validBatch.splice(0, validBatch.length));
+          await writeToAllWriters(validWriters, validBatch.splice(0, validBatch.length));
         }
         if (force || duplicateBatch.length >= 5000) {
-          await duplicateWriter.writeLines(duplicateBatch.splice(0, duplicateBatch.length));
+          await writeToAllWriters(duplicateWriters, duplicateBatch.splice(0, duplicateBatch.length));
         }
       };
 
@@ -854,17 +1010,25 @@ async function phaseTwoDedupe(settings, logger, stats, tempInfo, outputFiles) {
       }
     }
   } finally {
-    await validWriter.close();
-    await duplicateWriter.close();
+    await closeAllWriters(validWriters);
+    await closeAllWriters(duplicateWriters);
     if (!settings.keepTemp) {
       await fsp.rm(tempInfo.tempDir, { recursive: true, force: true });
     }
   }
 
-  outputFiles.validFiles = validWriter.files.slice();
-  outputFiles.duplicateFiles = duplicateWriter.files.slice();
-  if (outputFiles.validFiles[0]) outputFiles.valid = outputFiles.validFiles[0];
-  if (outputFiles.duplicateFiles[0]) outputFiles.duplicates = outputFiles.duplicateFiles[0];
+  const validGroups = getWriterFileGroups(validWriters);
+  const duplicateGroups = getWriterFileGroups(duplicateWriters);
+  outputFiles.validTxtFiles = validGroups.txtFiles || [];
+  outputFiles.validJsonlFiles = validGroups.jsonlFiles || [];
+  outputFiles.duplicateTxtFiles = duplicateGroups.txtFiles || [];
+  outputFiles.duplicateJsonlFiles = duplicateGroups.jsonlFiles || [];
+  outputFiles.validFiles = [...outputFiles.validTxtFiles, ...outputFiles.validJsonlFiles];
+  outputFiles.duplicateFiles = [...outputFiles.duplicateTxtFiles, ...outputFiles.duplicateJsonlFiles];
+  if (outputFiles.validTxtFiles[0]) outputFiles.valid = outputFiles.validTxtFiles[0];
+  else if (outputFiles.validJsonlFiles[0]) outputFiles.valid = outputFiles.validJsonlFiles[0];
+  if (outputFiles.duplicateTxtFiles[0]) outputFiles.duplicates = outputFiles.duplicateTxtFiles[0];
+  else if (outputFiles.duplicateJsonlFiles[0]) outputFiles.duplicates = outputFiles.duplicateJsonlFiles[0];
 
   return {
     validFiles: outputFiles.validFiles.slice(),
@@ -879,8 +1043,9 @@ async function phaseThreeWebhook(settings, logger, stats, outputFiles) {
     return;
   }
 
-  const validFiles = outputFiles.validFiles.length ? outputFiles.validFiles : outputFiles.valid ? [outputFiles.valid] : [];
-  if (!validFiles.length) {
+  const validTextFiles = outputFiles.validTxtFiles.length ? outputFiles.validTxtFiles : (outputFiles.valid && outputFiles.valid.endsWith('.txt') ? [outputFiles.valid] : []);
+  const validJsonlFiles = outputFiles.validJsonlFiles || [];
+  if (!validTextFiles.length && !validJsonlFiles.length) {
     logger.warn('webhook skipped: valid output files were not found');
     return;
   }
@@ -938,9 +1103,9 @@ async function phaseThreeWebhook(settings, logger, stats, outputFiles) {
     }
   };
 
-  for (const filePath of validFiles) {
+  for (const filePath of validTextFiles) {
     const rl = readline.createInterface({
-      input: fs.createReadStream(filePath, { encoding: 'utf8' }),
+      input: createTextReadStream(filePath),
       crlfDelay: Infinity,
     });
 
@@ -954,6 +1119,33 @@ async function phaseThreeWebhook(settings, logger, stats, outputFiles) {
     }
 
     rl.close();
+  }
+
+  if (!validTextFiles.length) {
+    for (const filePath of validJsonlFiles) {
+      const rl = readline.createInterface({
+        input: createTextReadStream(filePath),
+        crlfDelay: Infinity,
+      });
+
+      for await (const line of rl) {
+        if (!line) continue;
+        try {
+          const parsed = JSON.parse(line);
+          if (typeof parsed?.entry === 'string' && parsed.entry) {
+            batch.push(parsed.entry);
+          }
+        } catch {
+          // ignore malformed JSONL lines in webhook phase
+        }
+        if (batch.length >= settings.webhookBatchSize) {
+          await queueBatch(batch);
+          batch = [];
+        }
+      }
+
+      rl.close();
+    }
   }
 
   if (batch.length) {
@@ -973,9 +1165,12 @@ function buildSummary(settings, stats, outputFiles) {
     },
     settings: {
       input: settings.input,
+      inputDir: settings.inputDir,
       inputLabel: settings.inputLabel,
       stdin: settings.stdin,
       gzip: settings.gzip,
+      gzipOutput: settings.gzipOutput,
+      outputFormat: settings.outputFormat,
       outputDir: outputFiles.outputDir,
       profile: settings.profile,
       format: settings.format,
@@ -1012,19 +1207,8 @@ function buildSummary(settings, stats, outputFiles) {
   };
 }
 
-async function main() {
-  const rawArgs = parseArgs(process.argv.slice(2));
-  if (rawArgs.help) {
-    printHelp();
-    return;
-  }
-
-  const settings = resolveSettings(rawArgs);
-  const logger = createLogger(settings.quiet);
-  await ensureDir(settings.outputDir);
-
-  const outputFiles = buildOutputFiles(settings);
-  const stats = {
+function createInitialStats() {
+  return {
     startedAt: Date.now(),
     previousElapsedMs: 0,
     inputLines: 0,
@@ -1040,6 +1224,57 @@ async function main() {
     csvColumnResolved: 0,
     csvHeaders: [],
   };
+}
+
+function sanitizeOutputSegment(value) {
+  return String(value)
+    .replace(/\\/g, '/')
+    .replace(/^\.+/g, '')
+    .replace(/[^a-zA-Z0-9._/-]+/g, '-')
+    .replace(/\/+/g, '/')
+    .replace(/^\/|\/$/g, '')
+    || 'input';
+}
+
+function stripKnownExtensions(filePath) {
+  const lower = filePath.toLowerCase();
+  const known = ['.csv.gz', '.txt.gz', '.log.gz', '.gz', '.csv', '.txt', '.log'];
+  for (const ext of known) {
+    if (lower.endsWith(ext)) {
+      return filePath.slice(0, -ext.length);
+    }
+  }
+  return filePath.replace(/\.[^.]+$/, '');
+}
+
+async function collectFilesRecursive(directory) {
+  const output = [];
+  const entries = await fsp.readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      const nested = await collectFilesRecursive(fullPath);
+      output.push(...nested);
+    } else if (entry.isFile()) {
+      output.push(fullPath);
+    }
+  }
+  output.sort();
+  return output;
+}
+
+function deriveJobOutputDir(baseOutputDir, inputDir, filePath) {
+  const relative = path.relative(inputDir, filePath);
+  const withoutExt = stripKnownExtensions(relative);
+  return path.join(baseOutputDir, sanitizeOutputSegment(withoutExt));
+}
+
+async function processSingleInput(settings) {
+  const logger = createLogger(settings.quiet);
+  await ensureDir(settings.outputDir);
+
+  const outputFiles = buildOutputFiles(settings);
+  const stats = createInitialStats();
 
   let inputStat = null;
   if (!settings.stdin) {
@@ -1047,6 +1282,7 @@ async function main() {
     if (!inputStat.isFile()) {
       throw new Error('Input path must be a regular file');
     }
+    settings.inputSize = inputStat.size;
   }
 
   let checkpoint = null;
@@ -1065,7 +1301,7 @@ async function main() {
 
   logger.info(`input: ${settings.inputLabel}`);
   if (inputStat) logger.info(`size: ${inputStat.size.toLocaleString()} bytes`);
-  logger.info(`profile=${settings.profile} workers=${settings.workers} chunkSize=${settings.chunkSize} buckets=${settings.buckets} shardSize=${settings.shardSize || 0}`);
+  logger.info(`profile=${settings.profile} workers=${settings.workers} chunkSize=${settings.chunkSize} buckets=${settings.buckets} shardSize=${settings.shardSize || 0} outputFormat=${settings.outputFormat} gzipOutput=${settings.gzipOutput}`);
   logger.info(`safety: local-only validation of your provided input; no generation or external probing`);
 
   let tempInfo = checkpoint?.tempInfo || null;
@@ -1094,6 +1330,104 @@ async function main() {
   logger.info(`processed=${summary.stats.processed.toLocaleString()} valid=${summary.stats.validUnique.toLocaleString()} duplicates=${summary.stats.duplicates.toLocaleString()} invalid=${summary.stats.invalid.toLocaleString()}`);
   logger.info(`average=${summary.stats.averageRowsPerMinute.toLocaleString()} rows/min`);
   logger.info(`outputs: ${outputFiles.outputDir}`);
+  return summary;
+}
+
+async function processDirectory(settings) {
+  const logger = createLogger(settings.quiet);
+  const files = await collectFilesRecursive(settings.inputDir);
+  if (!files.length) {
+    throw new Error('Input directory does not contain any regular files');
+  }
+
+  await ensureDir(settings.outputDir);
+  const batchStartedAt = Date.now();
+  const summaries = [];
+  let batchProcessed = 0;
+  let batchValid = 0;
+  let batchDuplicates = 0;
+  let batchInvalid = 0;
+
+  logger.info(`directory mode: found ${files.length.toLocaleString()} file(s)`);
+
+  for (let index = 0; index < files.length; index += 1) {
+    const filePath = files[index];
+    const jobOutputDir = deriveJobOutputDir(settings.outputDir, settings.inputDir, filePath);
+    const jobSettings = {
+      ...settings,
+      input: filePath,
+      stdin: false,
+      inputDir: null,
+      inputLabel: filePath,
+      outputDir: jobOutputDir,
+      checkpointFile: path.join(jobOutputDir, path.basename(settings.checkpointFile)),
+      resume: settings.resume,
+    };
+
+    logger.info(`batch ${index + 1}/${files.length}: ${filePath}`);
+    const summary = await processSingleInput(jobSettings);
+    summaries.push(summary);
+    batchProcessed += summary.stats.processed;
+    batchValid += summary.stats.validUnique;
+    batchDuplicates += summary.stats.duplicates;
+    batchInvalid += summary.stats.invalid;
+  }
+
+  const elapsedMs = Date.now() - batchStartedAt;
+  const batchSummary = {
+    safety: {
+      description: 'Local-only batch processing of user-provided files.',
+      externalDiscovery: false,
+      randomGeneration: false,
+      liveVerification: false,
+    },
+    inputDir: settings.inputDir,
+    outputDir: settings.outputDir,
+    fileCount: files.length,
+    elapsedMs,
+    elapsedHuman: humanDuration(elapsedMs),
+    averageRowsPerMinute: elapsedMs > 0 ? Math.round((batchProcessed / elapsedMs) * 60000) : 0,
+    totals: {
+      processed: batchProcessed,
+      validUnique: batchValid,
+      duplicates: batchDuplicates,
+      invalid: batchInvalid,
+    },
+    files: summaries.map((summary) => ({
+      input: summary.settings.inputLabel,
+      outputDir: summary.files.outputDir,
+      processed: summary.stats.processed,
+      validUnique: summary.stats.validUnique,
+      duplicates: summary.stats.duplicates,
+      invalid: summary.stats.invalid,
+      averageRowsPerMinute: summary.stats.averageRowsPerMinute,
+      elapsedHuman: summary.stats.elapsedHuman,
+      summary: summary.files.summary,
+    })),
+  };
+
+  const batchSummaryPath = path.join(settings.outputDir, 'batch-summary.json');
+  await fsp.writeFile(batchSummaryPath, `${JSON.stringify(batchSummary, null, 2)}\n`, 'utf8');
+  logger.info(`batch complete in ${batchSummary.elapsedHuman}`);
+  logger.info(`batch processed=${batchProcessed.toLocaleString()} valid=${batchValid.toLocaleString()} duplicates=${batchDuplicates.toLocaleString()} invalid=${batchInvalid.toLocaleString()}`);
+  logger.info(`batch average=${batchSummary.averageRowsPerMinute.toLocaleString()} rows/min`);
+  logger.info(`batch summary: ${batchSummaryPath}`);
+}
+
+async function main() {
+  const rawArgs = parseArgs(process.argv.slice(2));
+  if (rawArgs.help) {
+    printHelp();
+    return;
+  }
+
+  const settings = resolveSettings(rawArgs);
+
+  if (settings.inputDir) {
+    await processDirectory(settings);
+  } else {
+    await processSingleInput(settings);
+  }
 }
 
 main().catch((error) => {
