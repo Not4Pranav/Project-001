@@ -1,0 +1,11 @@
+{
+  "name": "owned-gift-link-file-checker",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Safe local-only validator for user-provided gift link files",
+  "type": "module",
+  "scripts": {
+    "check:file": "node cli/owned-gift-link-checker.mjs",
+    "check:file:help": "node cli/owned-gift-link-checker.mjs --help"
+  }
+}
