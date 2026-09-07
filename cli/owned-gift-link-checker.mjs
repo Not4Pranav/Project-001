@@ -5,12 +5,14 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_WORKERS = Math.max(1, Math.min(8, os.cpus().length || 1));
 const DEFAULT_BUCKETS = 128;
+const CHECKPOINT_VERSION = 2;
 const PROFILES = {
   normal: { workers: 1, chunkSize: 2_000, webhookConcurrency: 1, webhookBatchSize: 10, buckets: 64 },
   fast: { workers: Math.min(2, DEFAULT_WORKERS), chunkSize: 8_000, webhookConcurrency: 2, webhookBatchSize: 25, buckets: 128 },
@@ -27,10 +29,13 @@ and can optionally send batches of your provided format-valid entries to a webho
 
 Usage:
   node cli/owned-gift-link-checker.mjs --input ./codes.txt [options]
+  node cli/owned-gift-link-checker.mjs --input ./codes.txt.gz --gzip auto [options]
+  cat ./codes.txt | node cli/owned-gift-link-checker.mjs --stdin [options]
   npm run check:file -- --input ./codes.txt [options]
 
 Required:
   --input, -i <path>               Path to input file
+  --stdin                          Read input from stdin instead of a file
 
 Optional:
   --output-dir, -o <path>          Output directory (default: ./output)
@@ -39,9 +44,13 @@ Optional:
   --delimiter <auto|,|;|tab|pipe>  CSV delimiter (default: auto)
   --column <auto|index|name>       CSV column to inspect (default: auto)
   --header <true|false>            CSV first row is header (default: true)
+  --gzip <auto|true|false>         Gzip input handling (default: auto)
   --workers <n>                    Worker threads (default from profile)
   --chunk-size <n>                 Rows per worker batch (default from profile)
   --buckets <n>                    Temp dedupe partitions (default from profile)
+  --shard-size <n>                 Max lines per output shard, 0=single file (default: 0)
+  --checkpoint-file <path>         Checkpoint file path (default: <output-dir>/checkpoint.json)
+  --resume                         Resume from an existing checkpoint
   --webhook-url <https-url>        Optional webhook URL for your provided valid entries only
   --webhook-concurrency <n>        Concurrent webhook requests (default from profile)
   --webhook-batch-size <n>         Entries per webhook batch (default from profile)
@@ -50,10 +59,11 @@ Optional:
   --help                           Show this help
 
 Outputs:
-  <output-dir>/valid.txt
-  <output-dir>/duplicates.txt
-  <output-dir>/invalid.txt
+  <output-dir>/valid.txt or valid-0001.txt, valid-0002.txt, ...
+  <output-dir>/duplicates.txt or duplicates-0001.txt, duplicates-0002.txt, ...
+  <output-dir>/invalid.txt or invalid-0001.txt, invalid-0002.txt, ...
   <output-dir>/summary.json
+  <output-dir>/checkpoint.json
 `);
 }
 
@@ -64,7 +74,12 @@ function parseArgs(argv) {
     delimiter: 'auto',
     column: 'auto',
     header: true,
+    gzip: 'auto',
     outputDir: path.resolve(process.cwd(), 'output'),
+    checkpointFile: null,
+    resume: false,
+    stdin: false,
+    shardSize: 0,
     quiet: false,
     keepTemp: false,
   };
@@ -82,6 +97,9 @@ function parseArgs(argv) {
       case '-i':
         args.input = next;
         index += 1;
+        break;
+      case '--stdin':
+        args.stdin = true;
         break;
       case '--output-dir':
       case '-o':
@@ -108,6 +126,10 @@ function parseArgs(argv) {
         args.header = parseBoolean(next, true);
         index += 1;
         break;
+      case '--gzip':
+        args.gzip = next;
+        index += 1;
+        break;
       case '--workers':
         args.workers = Number.parseInt(next, 10);
         index += 1;
@@ -119,6 +141,17 @@ function parseArgs(argv) {
       case '--buckets':
         args.buckets = Number.parseInt(next, 10);
         index += 1;
+        break;
+      case '--shard-size':
+        args.shardSize = Number.parseInt(next, 10);
+        index += 1;
+        break;
+      case '--checkpoint-file':
+        args.checkpointFile = path.resolve(process.cwd(), next);
+        index += 1;
+        break;
+      case '--resume':
+        args.resume = true;
         break;
       case '--webhook-url':
         args.webhookUrl = next;
@@ -149,6 +182,7 @@ function parseArgs(argv) {
 }
 
 function parseBoolean(value, fallback = false) {
+  if (typeof value === 'boolean') return value;
   if (typeof value !== 'string') return fallback;
   const normalized = value.toLowerCase();
   if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true;
@@ -161,24 +195,42 @@ function clampInt(value, min, max, fallback) {
   return Math.min(max, Math.max(min, value));
 }
 
+function resolveGzipMode(value) {
+  if (value === true || value === false) return value;
+  if (typeof value !== 'string') return 'auto';
+  const normalized = value.toLowerCase();
+  if (normalized === 'auto') return 'auto';
+  if (['true', '1', 'yes', 'y', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'n', 'off'].includes(normalized)) return false;
+  throw new Error(`Invalid --gzip: ${value}`);
+}
+
 function resolveSettings(rawArgs) {
   if (!(rawArgs.profile in PROFILES)) {
     throw new Error(`Invalid profile: ${rawArgs.profile}`);
   }
 
   const profile = PROFILES[rawArgs.profile];
+  const stdin = rawArgs.stdin || rawArgs.input === '-';
+  const input = stdin ? null : rawArgs.input ? path.resolve(process.cwd(), rawArgs.input) : undefined;
+  const checkpointFile = rawArgs.checkpointFile || path.join(rawArgs.outputDir, 'checkpoint.json');
   const settings = {
     ...rawArgs,
-    input: rawArgs.input ? path.resolve(process.cwd(), rawArgs.input) : undefined,
+    stdin,
+    input,
+    inputLabel: stdin ? 'stdin' : input,
+    checkpointFile,
+    gzip: resolveGzipMode(rawArgs.gzip),
     workers: clampInt(rawArgs.workers, 1, 32, profile.workers),
     chunkSize: clampInt(rawArgs.chunkSize, 100, 250_000, profile.chunkSize),
     webhookConcurrency: clampInt(rawArgs.webhookConcurrency, 1, 32, profile.webhookConcurrency),
     webhookBatchSize: clampInt(rawArgs.webhookBatchSize, 1, 5_000, profile.webhookBatchSize),
     buckets: clampInt(rawArgs.buckets, 8, 1_024, profile.buckets || DEFAULT_BUCKETS),
+    shardSize: clampInt(rawArgs.shardSize, 0, 5_000_000, 0),
   };
 
-  if (!settings.input) {
-    throw new Error('Missing required --input path');
+  if (!settings.stdin && !settings.input) {
+    throw new Error('Missing required --input path or --stdin');
   }
 
   if (!['auto', 'lines', 'csv'].includes(settings.format)) {
@@ -201,6 +253,7 @@ function resolveSettings(rawArgs) {
 
 function createLogger(quiet = false) {
   return {
+    quiet,
     info(message) {
       if (!quiet) console.log(`[info] ${message}`);
     },
@@ -276,6 +329,13 @@ function normalizeDelimiter(value) {
   return value;
 }
 
+function chooseFormat(settings) {
+  if (settings.format !== 'auto') return settings.format;
+  if (!settings.stdin && settings.input.toLowerCase().endsWith('.csv')) return 'csv';
+  if (!settings.stdin && settings.input.toLowerCase().endsWith('.csv.gz')) return 'csv';
+  return 'lines';
+}
+
 function createCsvResolver(settings, stats) {
   let headerConsumed = false;
   let delimiter = normalizeDelimiter(settings.delimiter);
@@ -334,11 +394,6 @@ function createLineResolver() {
   };
 }
 
-function chooseFormat(settings) {
-  if (settings.format !== 'auto') return settings.format;
-  return settings.input.toLowerCase().endsWith('.csv') ? 'csv' : 'lines';
-}
-
 function createRowResolver(settings, stats) {
   const format = chooseFormat(settings);
   stats.inputFormatResolved = format;
@@ -354,8 +409,12 @@ function hashString(value) {
   return hash >>> 0;
 }
 
-function rowsPerMinute(processedRows, startedAt) {
-  const elapsedMs = Date.now() - startedAt;
+function getElapsedMs(stats) {
+  return Math.max(0, (Date.now() - stats.startedAt) + (stats.previousElapsedMs || 0));
+}
+
+function rowsPerMinute(processedRows, stats) {
+  const elapsedMs = getElapsedMs(stats);
   if (elapsedMs <= 0) return 0;
   return Math.round((processedRows / elapsedMs) * 60_000);
 }
@@ -371,9 +430,8 @@ async function ensureDir(directoryPath) {
   await fsp.mkdir(directoryPath, { recursive: true });
 }
 
-async function writeLines(stream, lines) {
-  if (!lines.length) return;
-  const content = `${lines.join('\n')}\n`;
+async function writeContent(stream, content) {
+  if (!content) return;
   if (!stream.write(content)) {
     await new Promise((resolve, reject) => {
       stream.once('drain', resolve);
@@ -382,11 +440,81 @@ async function writeLines(stream, lines) {
   }
 }
 
+async function writeLines(stream, lines) {
+  if (!lines.length) return;
+  await writeContent(stream, `${lines.join('\n')}\n`);
+}
+
 async function endStream(stream) {
   await new Promise((resolve, reject) => {
     stream.end(() => resolve());
     stream.once('error', reject);
   });
+}
+
+class ShardedLineWriter {
+  constructor(outputDir, baseName, shardSize = 0) {
+    this.outputDir = outputDir;
+    this.baseName = baseName;
+    this.shardSize = shardSize;
+    this.files = [];
+    this.currentStream = null;
+    this.currentLines = 0;
+    this.currentIndex = 0;
+  }
+
+  nextFilePath() {
+    if (!this.shardSize) {
+      return path.join(this.outputDir, `${this.baseName}.txt`);
+    }
+    const suffix = String(this.currentIndex + 1).padStart(4, '0');
+    return path.join(this.outputDir, `${this.baseName}-${suffix}.txt`);
+  }
+
+  async ensureStream() {
+    if (this.currentStream) return;
+    const filePath = this.nextFilePath();
+    const stream = fs.createWriteStream(filePath, { flags: 'w' });
+    stream.setMaxListeners(0);
+    this.currentStream = stream;
+    this.files.push(filePath);
+    this.currentIndex += 1;
+    this.currentLines = 0;
+  }
+
+  async rotateIfNeeded() {
+    if (!this.shardSize || this.currentLines < this.shardSize) return;
+    await endStream(this.currentStream);
+    this.currentStream = null;
+  }
+
+  async writeLines(lines) {
+    if (!lines.length) return;
+
+    if (!this.shardSize) {
+      await this.ensureStream();
+      this.currentLines += lines.length;
+      await writeLines(this.currentStream, lines);
+      return;
+    }
+
+    let offset = 0;
+    while (offset < lines.length) {
+      await this.ensureStream();
+      const remaining = this.shardSize - this.currentLines;
+      const slice = lines.slice(offset, offset + remaining);
+      this.currentLines += slice.length;
+      offset += slice.length;
+      await writeLines(this.currentStream, slice);
+      await this.rotateIfNeeded();
+    }
+  }
+
+  async close() {
+    if (!this.currentStream) return;
+    await endStream(this.currentStream);
+    this.currentStream = null;
+  }
 }
 
 class WorkerPool {
@@ -456,22 +584,125 @@ class WorkerPool {
   }
 }
 
+function createInputStream(settings) {
+  const rawStream = settings.stdin
+    ? process.stdin
+    : fs.createReadStream(settings.input);
+
+  const shouldGunzip = settings.gzip === true
+    || (settings.gzip === 'auto' && !settings.stdin && settings.input.toLowerCase().endsWith('.gz'));
+
+  const stream = shouldGunzip
+    ? rawStream.pipe(zlib.createGunzip())
+    : rawStream;
+
+  if (typeof stream.setEncoding === 'function') {
+    stream.setEncoding('utf8');
+  }
+
+  return stream;
+}
+
+function buildOutputFiles(settings) {
+  return {
+    outputDir: settings.outputDir,
+    summary: path.join(settings.outputDir, 'summary.json'),
+    checkpoint: settings.checkpointFile,
+    valid: path.join(settings.outputDir, settings.shardSize ? 'valid-0001.txt' : 'valid.txt'),
+    duplicates: path.join(settings.outputDir, settings.shardSize ? 'duplicates-0001.txt' : 'duplicates.txt'),
+    invalid: path.join(settings.outputDir, settings.shardSize ? 'invalid-0001.txt' : 'invalid.txt'),
+    validFiles: [],
+    duplicateFiles: [],
+    invalidFiles: [],
+  };
+}
+
+async function saveCheckpoint(checkpointFile, payload) {
+  await ensureDir(path.dirname(checkpointFile));
+  const tempFile = `${checkpointFile}.tmp`;
+  await fsp.writeFile(tempFile, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+  await fsp.rename(tempFile, checkpointFile);
+}
+
+async function loadCheckpoint(checkpointFile) {
+  const content = await fsp.readFile(checkpointFile, 'utf8');
+  return JSON.parse(content);
+}
+
+function buildCheckpointPayload(phase, settings, stats, outputFiles, extra = {}) {
+  return {
+    version: CHECKPOINT_VERSION,
+    phase,
+    updatedAt: new Date().toISOString(),
+    settings: {
+      inputLabel: settings.inputLabel,
+      stdin: settings.stdin,
+      profile: settings.profile,
+      format: settings.format,
+      delimiter: settings.delimiter,
+      column: settings.column,
+      header: settings.header,
+      gzip: settings.gzip,
+      workers: settings.workers,
+      chunkSize: settings.chunkSize,
+      buckets: settings.buckets,
+      shardSize: settings.shardSize,
+      webhookEnabled: Boolean(settings.webhookUrl),
+      webhookConcurrency: settings.webhookConcurrency,
+      webhookBatchSize: settings.webhookBatchSize,
+      keepTemp: settings.keepTemp,
+    },
+    stats: {
+      ...stats,
+      previousElapsedMs: getElapsedMs(stats),
+      startedAt: Date.now(),
+    },
+    outputFiles,
+    ...extra,
+  };
+}
+
+function validateResumeCompatibility(settings, checkpoint) {
+  if (!checkpoint || typeof checkpoint !== 'object') {
+    throw new Error('Checkpoint file is invalid');
+  }
+  if (checkpoint.version !== CHECKPOINT_VERSION) {
+    throw new Error(`Checkpoint version mismatch: expected ${CHECKPOINT_VERSION}, got ${checkpoint.version}`);
+  }
+  if (!checkpoint.settings || checkpoint.settings.inputLabel !== settings.inputLabel) {
+    throw new Error('Checkpoint input does not match current input source');
+  }
+}
+
+function normalizeResumedState(checkpoint, stats, outputFiles) {
+  const phase = checkpoint.phase;
+
+  if (phase === 'phase1-complete') {
+    stats.validUnique = 0;
+    stats.duplicates = 0;
+    stats.webhookDeliveries = 0;
+    stats.webhookFailures = 0;
+    outputFiles.validFiles = [];
+    outputFiles.duplicateFiles = [];
+    outputFiles.valid = path.join(outputFiles.outputDir, checkpoint.settings.shardSize ? 'valid-0001.txt' : 'valid.txt');
+    outputFiles.duplicates = path.join(outputFiles.outputDir, checkpoint.settings.shardSize ? 'duplicates-0001.txt' : 'duplicates.txt');
+  } else if (phase === 'phase2-complete') {
+    stats.webhookDeliveries = 0;
+    stats.webhookFailures = 0;
+  }
+}
+
 async function phaseOnePartition(settings, logger, stats, outputFiles) {
   const tempDir = path.join(outputFiles.outputDir, `.tmp-${Date.now()}`);
   stats.tempDir = tempDir;
   await ensureDir(tempDir);
 
-  const invalidStream = fs.createWriteStream(outputFiles.invalid, { flags: 'w' });
-  invalidStream.setMaxListeners(0);
+  const invalidWriter = new ShardedLineWriter(outputFiles.outputDir, 'invalid', settings.shardSize);
   const bucketStreams = Array.from({ length: settings.buckets }, (_, index) => {
     const bucketPath = path.join(tempDir, `bucket-${String(index).padStart(4, '0')}.txt`);
     const stream = fs.createWriteStream(bucketPath, { flags: 'w' });
     stream.setMaxListeners(0);
-    return {
-      index,
-      path: bucketPath,
-      stream,
-    };
+    return { index, path: bucketPath, stream };
   });
 
   const resolver = createRowResolver(settings, stats);
@@ -480,7 +711,7 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
   await pool.init();
 
   const rl = readline.createInterface({
-    input: fs.createReadStream(settings.input, { encoding: 'utf8' }),
+    input: createInputStream(settings),
     crlfDelay: Infinity,
   });
 
@@ -493,7 +724,7 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
     stats.invalid += Array.isArray(result.invalid) ? result.invalid.length : 0;
 
     if (Array.isArray(result.invalid) && result.invalid.length) {
-      await writeLines(invalidStream, result.invalid);
+      await invalidWriter.writeLines(result.invalid);
     }
 
     if (Array.isArray(result.valid) && result.valid.length) {
@@ -515,7 +746,8 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
     if (!candidateChunk.length) return;
     const rows = candidateChunk;
     candidateChunk = [];
-    const task = pool.run(rows)
+    let task;
+    task = pool.run(rows)
       .then(processWorkerResult)
       .finally(() => inflight.delete(task));
     inflight.add(task);
@@ -525,9 +757,11 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
     }
   };
 
-  const progressTimer = setInterval(() => {
-    logger.info(`phase 1: processed ${stats.processed.toLocaleString()} rows at ~${rowsPerMinute(stats.processed, stats.startedAt).toLocaleString()} rows/min`);
-  }, logger.quiet ? 0x7fffffff : 5000);
+  const progressTimer = settings.quiet
+    ? null
+    : setInterval(() => {
+        logger.info(`phase 1: processed ${stats.processed.toLocaleString()} rows at ~${rowsPerMinute(stats.processed, stats).toLocaleString()} rows/min`);
+      }, 5000);
 
   try {
     for await (const line of rl) {
@@ -539,7 +773,7 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
         stats.totalRows += 1;
         stats.processed += 1;
         stats.invalid += 1;
-        await writeLines(invalidStream, [resolved.invalid]);
+        await invalidWriter.writeLines([resolved.invalid]);
       } else if (resolved.row) {
         stats.totalRows += 1;
         candidateChunk.push(resolved.row);
@@ -552,23 +786,28 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
     await queueChunk();
     await Promise.all(inflight);
   } finally {
-    clearInterval(progressTimer);
+    if (progressTimer) clearInterval(progressTimer);
     rl.close();
     await pool.destroy();
-    await endStream(invalidStream);
+    await invalidWriter.close();
     for (const bucket of bucketStreams) {
       await endStream(bucket.stream);
     }
   }
 
-  return { tempDir, bucketFiles: bucketStreams.map((entry) => entry.path) };
+  outputFiles.invalidFiles = invalidWriter.files.slice();
+  if (outputFiles.invalidFiles[0]) outputFiles.invalid = outputFiles.invalidFiles[0];
+
+  return {
+    tempDir,
+    bucketFiles: bucketStreams.map((entry) => entry.path),
+    invalidFiles: outputFiles.invalidFiles.slice(),
+  };
 }
 
 async function phaseTwoDedupe(settings, logger, stats, tempInfo, outputFiles) {
-  const validStream = fs.createWriteStream(outputFiles.valid, { flags: 'w' });
-  const duplicateStream = fs.createWriteStream(outputFiles.duplicates, { flags: 'w' });
-  validStream.setMaxListeners(0);
-  duplicateStream.setMaxListeners(0);
+  const validWriter = new ShardedLineWriter(outputFiles.outputDir, 'valid', settings.shardSize);
+  const duplicateWriter = new ShardedLineWriter(outputFiles.outputDir, 'duplicates', settings.shardSize);
 
   try {
     for (let index = 0; index < tempInfo.bucketFiles.length; index += 1) {
@@ -583,10 +822,10 @@ async function phaseTwoDedupe(settings, logger, stats, tempInfo, outputFiles) {
       const duplicateBatch = [];
       const flushIfNeeded = async (force = false) => {
         if (force || validBatch.length >= 5000) {
-          await writeLines(validStream, validBatch.splice(0, validBatch.length));
+          await validWriter.writeLines(validBatch.splice(0, validBatch.length));
         }
         if (force || duplicateBatch.length >= 5000) {
-          await writeLines(duplicateStream, duplicateBatch.splice(0, duplicateBatch.length));
+          await duplicateWriter.writeLines(duplicateBatch.splice(0, duplicateBatch.length));
         }
       };
 
@@ -615,12 +854,22 @@ async function phaseTwoDedupe(settings, logger, stats, tempInfo, outputFiles) {
       }
     }
   } finally {
-    await endStream(validStream);
-    await endStream(duplicateStream);
+    await validWriter.close();
+    await duplicateWriter.close();
     if (!settings.keepTemp) {
       await fsp.rm(tempInfo.tempDir, { recursive: true, force: true });
     }
   }
+
+  outputFiles.validFiles = validWriter.files.slice();
+  outputFiles.duplicateFiles = duplicateWriter.files.slice();
+  if (outputFiles.validFiles[0]) outputFiles.valid = outputFiles.validFiles[0];
+  if (outputFiles.duplicateFiles[0]) outputFiles.duplicates = outputFiles.duplicateFiles[0];
+
+  return {
+    validFiles: outputFiles.validFiles.slice(),
+    duplicateFiles: outputFiles.duplicateFiles.slice(),
+  };
 }
 
 async function phaseThreeWebhook(settings, logger, stats, outputFiles) {
@@ -630,13 +879,14 @@ async function phaseThreeWebhook(settings, logger, stats, outputFiles) {
     return;
   }
 
+  const validFiles = outputFiles.validFiles.length ? outputFiles.validFiles : outputFiles.valid ? [outputFiles.valid] : [];
+  if (!validFiles.length) {
+    logger.warn('webhook skipped: valid output files were not found');
+    return;
+  }
+
   const totalBatches = Math.ceil(stats.validUnique / settings.webhookBatchSize);
   logger.info(`phase 3: sending ${stats.validUnique.toLocaleString()} valid entries in ${totalBatches.toLocaleString()} webhook batch(es)`);
-
-  const rl = readline.createInterface({
-    input: fs.createReadStream(outputFiles.valid, { encoding: 'utf8' }),
-    crlfDelay: Infinity,
-  });
 
   const inflight = new Set();
   let batch = [];
@@ -680,23 +930,32 @@ async function phaseThreeWebhook(settings, logger, stats, outputFiles) {
 
   const queueBatch = async (entries) => {
     batchIndex += 1;
-    const task = sendBatch(entries, batchIndex).finally(() => inflight.delete(task));
+    let task;
+    task = sendBatch(entries, batchIndex).finally(() => inflight.delete(task));
     inflight.add(task);
     if (inflight.size >= settings.webhookConcurrency) {
       await Promise.race(inflight);
     }
   };
 
-  for await (const line of rl) {
-    if (!line) continue;
-    batch.push(line);
-    if (batch.length >= settings.webhookBatchSize) {
-      await queueBatch(batch);
-      batch = [];
+  for (const filePath of validFiles) {
+    const rl = readline.createInterface({
+      input: fs.createReadStream(filePath, { encoding: 'utf8' }),
+      crlfDelay: Infinity,
+    });
+
+    for await (const line of rl) {
+      if (!line) continue;
+      batch.push(line);
+      if (batch.length >= settings.webhookBatchSize) {
+        await queueBatch(batch);
+        batch = [];
+      }
     }
+
+    rl.close();
   }
 
-  rl.close();
   if (batch.length) {
     await queueBatch(batch);
   }
@@ -704,8 +963,7 @@ async function phaseThreeWebhook(settings, logger, stats, outputFiles) {
 }
 
 function buildSummary(settings, stats, outputFiles) {
-  const endedAt = Date.now();
-  const elapsedMs = endedAt - stats.startedAt;
+  const elapsedMs = getElapsedMs(stats);
   return {
     safety: {
       description: 'Local-only processing of user-provided entries.',
@@ -715,6 +973,9 @@ function buildSummary(settings, stats, outputFiles) {
     },
     settings: {
       input: settings.input,
+      inputLabel: settings.inputLabel,
+      stdin: settings.stdin,
+      gzip: settings.gzip,
       outputDir: outputFiles.outputDir,
       profile: settings.profile,
       format: settings.format,
@@ -726,10 +987,12 @@ function buildSummary(settings, stats, outputFiles) {
       workers: settings.workers,
       chunkSize: settings.chunkSize,
       buckets: settings.buckets,
+      shardSize: settings.shardSize,
       webhookEnabled: Boolean(settings.webhookUrl),
       webhookConcurrency: settings.webhookConcurrency,
       webhookBatchSize: settings.webhookBatchSize,
       keepTemp: settings.keepTemp,
+      resume: settings.resume,
     },
     files: outputFiles,
     stats: {
@@ -744,7 +1007,7 @@ function buildSummary(settings, stats, outputFiles) {
       webhookFailures: stats.webhookFailures,
       elapsedMs,
       elapsedHuman: humanDuration(elapsedMs),
-      averageRowsPerMinute: rowsPerMinute(stats.processed, stats.startedAt),
+      averageRowsPerMinute: rowsPerMinute(stats.processed, stats),
     },
   };
 }
@@ -758,25 +1021,12 @@ async function main() {
 
   const settings = resolveSettings(rawArgs);
   const logger = createLogger(settings.quiet);
-  logger.quiet = settings.quiet;
-
-  const inputStat = await fsp.stat(settings.input);
-  if (!inputStat.isFile()) {
-    throw new Error('Input path must be a regular file');
-  }
-
   await ensureDir(settings.outputDir);
 
-  const outputFiles = {
-    outputDir: settings.outputDir,
-    valid: path.join(settings.outputDir, 'valid.txt'),
-    duplicates: path.join(settings.outputDir, 'duplicates.txt'),
-    invalid: path.join(settings.outputDir, 'invalid.txt'),
-    summary: path.join(settings.outputDir, 'summary.json'),
-  };
-
+  const outputFiles = buildOutputFiles(settings);
   const stats = {
     startedAt: Date.now(),
+    previousElapsedMs: 0,
     inputLines: 0,
     totalRows: 0,
     processed: 0,
@@ -791,17 +1041,54 @@ async function main() {
     csvHeaders: [],
   };
 
-  logger.info(`input: ${settings.input}`);
-  logger.info(`size: ${inputStat.size.toLocaleString()} bytes`);
-  logger.info(`profile=${settings.profile} workers=${settings.workers} chunkSize=${settings.chunkSize} buckets=${settings.buckets}`);
-  logger.info(`safety: local-only validation of your provided file; no generation or external probing`);
+  let inputStat = null;
+  if (!settings.stdin) {
+    inputStat = await fsp.stat(settings.input);
+    if (!inputStat.isFile()) {
+      throw new Error('Input path must be a regular file');
+    }
+  }
 
-  const tempInfo = await phaseOnePartition(settings, logger, stats, outputFiles);
-  await phaseTwoDedupe(settings, logger, stats, tempInfo, outputFiles);
-  await phaseThreeWebhook(settings, logger, stats, outputFiles);
+  let checkpoint = null;
+  if (settings.resume) {
+    checkpoint = await loadCheckpoint(settings.checkpointFile);
+    validateResumeCompatibility(settings, checkpoint);
+    Object.assign(stats, checkpoint.stats || {});
+    stats.startedAt = Date.now();
+    stats.previousElapsedMs = checkpoint.stats?.previousElapsedMs || checkpoint.stats?.elapsedMs || 0;
+    if (checkpoint.outputFiles) {
+      Object.assign(outputFiles, checkpoint.outputFiles);
+    }
+    normalizeResumedState(checkpoint, stats, outputFiles);
+    logger.info(`resuming from checkpoint phase: ${checkpoint.phase}`);
+  }
+
+  logger.info(`input: ${settings.inputLabel}`);
+  if (inputStat) logger.info(`size: ${inputStat.size.toLocaleString()} bytes`);
+  logger.info(`profile=${settings.profile} workers=${settings.workers} chunkSize=${settings.chunkSize} buckets=${settings.buckets} shardSize=${settings.shardSize || 0}`);
+  logger.info(`safety: local-only validation of your provided input; no generation or external probing`);
+
+  let tempInfo = checkpoint?.tempInfo || null;
+
+  if (!checkpoint || checkpoint.phase === 'new') {
+    tempInfo = await phaseOnePartition(settings, logger, stats, outputFiles);
+    await saveCheckpoint(settings.checkpointFile, buildCheckpointPayload('phase1-complete', settings, stats, outputFiles, { tempInfo }));
+    logger.info('checkpoint saved after phase 1');
+  }
+
+  if (!checkpoint || checkpoint.phase === 'phase1-complete' || checkpoint.phase === 'new') {
+    await phaseTwoDedupe(settings, logger, stats, tempInfo, outputFiles);
+    await saveCheckpoint(settings.checkpointFile, buildCheckpointPayload('phase2-complete', settings, stats, outputFiles, { tempInfo }));
+    logger.info('checkpoint saved after phase 2');
+  }
+
+  if (!checkpoint || checkpoint.phase === 'phase2-complete' || checkpoint.phase === 'phase1-complete' || checkpoint.phase === 'new') {
+    await phaseThreeWebhook(settings, logger, stats, outputFiles);
+  }
 
   const summary = buildSummary(settings, stats, outputFiles);
   await fsp.writeFile(outputFiles.summary, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+  await saveCheckpoint(settings.checkpointFile, buildCheckpointPayload('complete', settings, stats, outputFiles, { tempInfo }));
 
   logger.info(`done in ${summary.stats.elapsedHuman}`);
   logger.info(`processed=${summary.stats.processed.toLocaleString()} valid=${summary.stats.validUnique.toLocaleString()} duplicates=${summary.stats.duplicates.toLocaleString()} invalid=${summary.stats.invalid.toLocaleString()}`);
