@@ -571,6 +571,7 @@ AbCdEf1234567890"></textarea>
         <section class="card">
             <h2>Results</h2>
             <p>These are local classification results based on the entries you supplied.</p>
+            <p class="hint" style="margin-top: 8px;">For very large files, use streamed file mode, summary logs, and CSV export to keep browser overhead lower.</p>
             <div class="results-grid" style="margin-top: 16px;">
                 <div class="result-panel">
                     <div>
@@ -581,6 +582,7 @@ AbCdEf1234567890"></textarea>
                     <div class="control-row">
                         <button class="ghost-btn" type="button" data-copy-target="validOutput">Copy</button>
                         <button class="ghost-btn" type="button" data-download="valid">Download .txt</button>
+                        <button class="ghost-btn" type="button" data-download-csv="valid">Download .csv</button>
                     </div>
                 </div>
 
@@ -593,6 +595,7 @@ AbCdEf1234567890"></textarea>
                     <div class="control-row">
                         <button class="ghost-btn" type="button" data-copy-target="duplicateOutput">Copy</button>
                         <button class="ghost-btn" type="button" data-download="duplicates">Download .txt</button>
+                        <button class="ghost-btn" type="button" data-download-csv="duplicates">Download .csv</button>
                     </div>
                 </div>
 
@@ -605,6 +608,7 @@ AbCdEf1234567890"></textarea>
                     <div class="control-row">
                         <button class="ghost-btn" type="button" data-copy-target="invalidOutput">Copy</button>
                         <button class="ghost-btn" type="button" data-download="invalid">Download .txt</button>
+                        <button class="ghost-btn" type="button" data-download-csv="invalid">Download .csv</button>
                     </div>
                 </div>
             </div>
@@ -633,6 +637,9 @@ AbCdEf1234567890"></textarea>
         const SAVE_DRAFT_LIMIT = 100000;
         const VALID_CODE_REGEX = /^[A-Za-z0-9_-]{16,64}$/;
         const HARDWARE_THREADS = Math.max(1, Math.min(16, navigator.hardwareConcurrency || 4));
+        const WHITESPACE_REGEX = /\s/;
+        const LARGE_FILE_ROW_THRESHOLD = 100000;
+        const HUGE_FILE_ROW_THRESHOLD = 500000;
 
         const MODE_CONFIG = {
             normal: {
@@ -886,7 +893,45 @@ AbCdEf1234567890"></textarea>
             const settings = readSettings();
             const profile = getCurrentProfile();
             const source = state.selectedFile && settings.streamFile ? 'uploaded file stream' : 'textarea/manual input';
-            elements.engineHint.textContent = `Detected browser threads: ${HARDWARE_THREADS}. Profile: ${profile.label}. Workers: ${settings.workers}. Chunk size: ${settings.chunkSize}. Source: ${source}. Webhook channels: ${settings.webhookConcurrency}. Webhook batch size: ${settings.webhookBatchSize}. ${profile.note}`;
+            elements.engineHint.textContent = `Detected browser threads: ${HARDWARE_THREADS}. Profile: ${profile.label}. Workers: ${settings.workers}. Chunk size: ${settings.chunkSize}. Source: ${source}. Webhook channels: ${settings.webhookConcurrency}. Webhook batch size: ${settings.webhookBatchSize}. Large inputs auto-switch verbose logs off at ${LARGE_FILE_ROW_THRESHOLD.toLocaleString()}+ rows. ${profile.note}`;
+        }
+
+        function estimateCurrentInputRows(useDirectFile) {
+            if (useDirectFile && state.approximateInputRows) {
+                return state.approximateInputRows;
+            }
+            const text = elements.inputLinks.value;
+            if (!text.trim()) return 0;
+            return text.split(/\r?\n/).filter(Boolean).length;
+        }
+
+        function autoTuneSettings(settings, useDirectFile) {
+            const tuned = { ...settings };
+            const estimatedRows = estimateCurrentInputRows(useDirectFile);
+
+            if (estimatedRows >= LARGE_FILE_ROW_THRESHOLD && tuned.logMode === 'verbose') {
+                tuned.logMode = 'summary';
+                elements.logModeSelect.value = 'summary';
+                log('Verbose logging was auto-switched to summary mode for large input.', 'warning');
+            }
+
+            if (estimatedRows >= HUGE_FILE_ROW_THRESHOLD && tuned.chunkSize < 4000) {
+                tuned.chunkSize = 4000;
+                elements.chunkSizeInput.value = 4000;
+                log('Chunk size was auto-raised for huge input to reduce browser overhead.', 'warning');
+            } else if (estimatedRows >= LARGE_FILE_ROW_THRESHOLD && tuned.chunkSize < 2000) {
+                tuned.chunkSize = 2000;
+                elements.chunkSizeInput.value = 2000;
+                log('Chunk size was auto-raised for large input.', 'warning');
+            }
+
+            if (estimatedRows >= HUGE_FILE_ROW_THRESHOLD && tuned.workers < Math.min(8, HARDWARE_THREADS)) {
+                tuned.workers = Math.min(8, HARDWARE_THREADS);
+                elements.workerCountInput.value = tuned.workers;
+                log('Worker count was auto-raised for huge input.', 'warning');
+            }
+
+            return tuned;
         }
 
         function resetProcessingState({ keepInput = true, clearLog = false, clearFile = false } = {}) {
@@ -935,49 +980,76 @@ AbCdEf1234567890"></textarea>
             setStatus('Ready. Upload a file or paste owned links/codes, then click “Start processing”.', 'ready');
         }
 
+        function isValidCodeFast(value) {
+            const length = value.length;
+            if (length < 16 || length > 64) return false;
+            for (let i = 0; i < length; i++) {
+                const code = value.charCodeAt(i);
+                const isDigit = code >= 48 && code <= 57;
+                const isUpper = code >= 65 && code <= 90;
+                const isLower = code >= 97 && code <= 122;
+                const isDash = code === 45;
+                const isUnderscore = code === 95;
+                if (!(isDigit || isUpper || isLower || isDash || isUnderscore)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        function sliceCodeTail(tail) {
+            let end = tail.length;
+            const question = tail.indexOf('?');
+            const hash = tail.indexOf('#');
+            if (question !== -1 && question < end) end = question;
+            if (hash !== -1 && hash < end) end = hash;
+            while (end > 0 && tail.charCodeAt(end - 1) === 47) end -= 1;
+            return tail.slice(0, end);
+        }
+
         function normalizeGiftEntry(rawInput) {
             const raw = String(rawInput || '').trim();
             if (!raw) {
                 return { kind: 'empty' };
             }
 
-            const compact = raw.replace(/\s+/g, '');
-            if (VALID_CODE_REGEX.test(compact)) {
+            const compact = WHITESPACE_REGEX.test(raw) ? raw.replace(/\s+/g, '') : raw;
+            if (isValidCodeFast(compact)) {
                 return {
                     kind: 'valid',
                     normalized: `https://discord.gift/${compact}`
                 };
             }
 
-            const normalizedUrlInput = /^(discord\.gift|www\.discord\.gift|discord\.com|www\.discord\.com|discordapp\.com|www\.discordapp\.com)\//i.test(compact)
-                ? `https://${compact}`
-                : compact;
+            let probeLower = compact.toLowerCase();
+            let probeOriginal = compact;
 
-            let parsed;
-            try {
-                parsed = new URL(normalizedUrlInput);
-            } catch {
-                return { kind: 'invalid', reason: 'Not a supported link or code', raw };
+            if (probeLower.startsWith('https://')) {
+                probeLower = probeLower.slice(8);
+                probeOriginal = probeOriginal.slice(8);
+            } else if (probeLower.startsWith('http://')) {
+                probeLower = probeLower.slice(7);
+                probeOriginal = probeOriginal.slice(7);
             }
 
-            const host = parsed.hostname.toLowerCase();
-            let pathname = parsed.pathname;
-            while (pathname.endsWith('/')) pathname = pathname.slice(0, -1);
-            const segments = pathname.split('/').filter(Boolean);
-            const supportedHosts = new Set(['discord.gift', 'www.discord.gift', 'discord.com', 'www.discord.com', 'discordapp.com', 'www.discordapp.com']);
+            if (probeLower.startsWith('www.')) {
+                probeLower = probeLower.slice(4);
+                probeOriginal = probeOriginal.slice(4);
+            }
 
-            if (!supportedHosts.has(host)) {
+            let tail = null;
+            if (probeLower.startsWith('discord.gift/')) {
+                tail = probeOriginal.slice('discord.gift/'.length);
+            } else if (probeLower.startsWith('discord.com/gifts/')) {
+                tail = probeOriginal.slice('discord.com/gifts/'.length);
+            } else if (probeLower.startsWith('discordapp.com/gifts/')) {
+                tail = probeOriginal.slice('discordapp.com/gifts/'.length);
+            } else {
                 return { kind: 'invalid', reason: 'Unsupported host', raw };
             }
 
-            let code = null;
-            if (host.includes('discord.gift') && segments.length === 1) {
-                code = segments[0];
-            } else if ((host.includes('discord.com') || host.includes('discordapp.com')) && segments.length === 2 && segments[0].toLowerCase() === 'gifts') {
-                code = segments[1];
-            }
-
-            if (!code || !VALID_CODE_REGEX.test(code)) {
+            const code = sliceCodeTail(tail);
+            if (!isValidCodeFast(code)) {
                 return { kind: 'invalid', reason: 'Unsupported path or code shape', raw };
             }
 
@@ -1158,46 +1230,71 @@ AbCdEf1234567890"></textarea>
 
         function buildWorkerUrl() {
             const workerSource = String.raw`
-                const VALID_CODE_REGEX = /^[A-Za-z0-9_-]{16,64}$/;
+                function isValidCodeFast(value) {
+                    const length = value.length;
+                    if (length < 16 || length > 64) return false;
+                    for (let i = 0; i < length; i++) {
+                        const code = value.charCodeAt(i);
+                        const isDigit = code >= 48 && code <= 57;
+                        const isUpper = code >= 65 && code <= 90;
+                        const isLower = code >= 97 && code <= 122;
+                        const isDash = code === 45;
+                        const isUnderscore = code === 95;
+                        if (!(isDigit || isUpper || isLower || isDash || isUnderscore)) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+
+                function sliceCodeTail(tail) {
+                    let end = tail.length;
+                    const question = tail.indexOf('?');
+                    const hash = tail.indexOf('#');
+                    if (question !== -1 && question < end) end = question;
+                    if (hash !== -1 && hash < end) end = hash;
+                    while (end > 0 && tail.charCodeAt(end - 1) === 47) end -= 1;
+                    return tail.slice(0, end);
+                }
 
                 function normalizeGiftEntry(rawInput) {
                     const raw = String(rawInput || '').trim();
                     if (!raw) return { kind: 'empty' };
 
-                    const compact = raw.replace(/\s+/g, '');
-                    if (VALID_CODE_REGEX.test(compact)) {
+                    const compact = /\s/.test(raw) ? raw.replace(/\s+/g, '') : raw;
+                    if (isValidCodeFast(compact)) {
                         return { kind: 'valid', normalized: 'https://discord.gift/' + compact };
                     }
 
-                    const normalizedUrlInput = /^(discord\.gift|www\.discord\.gift|discord\.com|www\.discord\.com|discordapp\.com|www\.discordapp\.com)\//i.test(compact)
-                        ? 'https://' + compact
-                        : compact;
+                    let probeLower = compact.toLowerCase();
+                    let probeOriginal = compact;
 
-                    let parsed;
-                    try {
-                        parsed = new URL(normalizedUrlInput);
-                    } catch {
-                        return { kind: 'invalid', reason: 'Not a supported link or code', raw };
+                    if (probeLower.startsWith('https://')) {
+                        probeLower = probeLower.slice(8);
+                        probeOriginal = probeOriginal.slice(8);
+                    } else if (probeLower.startsWith('http://')) {
+                        probeLower = probeLower.slice(7);
+                        probeOriginal = probeOriginal.slice(7);
                     }
 
-                    const host = parsed.hostname.toLowerCase();
-                    let pathname = parsed.pathname;
-                    while (pathname.endsWith('/')) pathname = pathname.slice(0, -1);
-                    const segments = pathname.split('/').filter(Boolean);
-                    const supportedHosts = new Set(['discord.gift', 'www.discord.gift', 'discord.com', 'www.discord.com', 'discordapp.com', 'www.discordapp.com']);
+                    if (probeLower.startsWith('www.')) {
+                        probeLower = probeLower.slice(4);
+                        probeOriginal = probeOriginal.slice(4);
+                    }
 
-                    if (!supportedHosts.has(host)) {
+                    let tail = null;
+                    if (probeLower.startsWith('discord.gift/')) {
+                        tail = probeOriginal.slice('discord.gift/'.length);
+                    } else if (probeLower.startsWith('discord.com/gifts/')) {
+                        tail = probeOriginal.slice('discord.com/gifts/'.length);
+                    } else if (probeLower.startsWith('discordapp.com/gifts/')) {
+                        tail = probeOriginal.slice('discordapp.com/gifts/'.length);
+                    } else {
                         return { kind: 'invalid', reason: 'Unsupported host', raw };
                     }
 
-                    let code = null;
-                    if (host.includes('discord.gift') && segments.length === 1) {
-                        code = segments[0];
-                    } else if ((host.includes('discord.com') || host.includes('discordapp.com')) && segments.length === 2 && segments[0].toLowerCase() === 'gifts') {
-                        code = segments[1];
-                    }
-
-                    if (!code || !VALID_CODE_REGEX.test(code)) {
+                    const code = sliceCodeTail(tail);
+                    if (!isValidCodeFast(code)) {
                         return { kind: 'invalid', reason: 'Unsupported path or code shape', raw };
                     }
 
@@ -1515,8 +1612,9 @@ AbCdEf1234567890"></textarea>
                 return;
             }
 
+            const tunedSettings = autoTuneSettings(settings, useDirectFile);
             resetProcessingState({ keepInput: true, clearLog: false, clearFile: false });
-            const activeSettings = readSettings();
+            const activeSettings = { ...readSettings(), ...tunedSettings };
             state.isRunning = true;
             state.startedAt = Date.now();
             state.usingDirectFile = useDirectFile;
@@ -1526,8 +1624,9 @@ AbCdEf1234567890"></textarea>
             startStatsTimer();
             updateEngineHint();
             updateStats({ force: true });
+            const estimatedRows = estimateCurrentInputRows(useDirectFile);
             setStatus(`Processing started using ${useDirectFile ? 'uploaded file stream' : 'textarea input'} with ${activeSettings.workers} worker(s).`, 'running');
-            log(`Processing started. Source: ${useDirectFile ? 'uploaded file stream' : 'textarea/manual input'}.`, 'info');
+            log(`Processing started. Source: ${useDirectFile ? 'uploaded file stream' : 'textarea/manual input'}. Estimated rows: ${estimatedRows.toLocaleString() || 'unknown'}.`, 'info');
 
             try {
                 const producerPromise = useDirectFile ? produceFromFile(activeSettings) : produceFromText(activeSettings);
@@ -1601,33 +1700,50 @@ AbCdEf1234567890"></textarea>
             log('Stop requested. Waiting for in-flight worker batches to finish.', 'warning');
         }
 
-        function downloadText(kind) {
+        function escapeCsvCell(value) {
+            const text = String(value ?? '');
+            return `"${text.replace(/"/g, '""')}"`;
+        }
+
+        function downloadResults(kind, format = 'txt') {
             const map = {
                 valid: {
-                    filename: 'format-valid-owned-gift-links.txt',
-                    content: state.valid.join('\n')
+                    txtName: 'format-valid-owned-gift-links.txt',
+                    csvName: 'format-valid-owned-gift-links.csv',
+                    rows: state.valid,
+                    header: 'entry'
                 },
                 duplicates: {
-                    filename: 'duplicate-owned-gift-links.txt',
-                    content: state.duplicates.join('\n')
+                    txtName: 'duplicate-owned-gift-links.txt',
+                    csvName: 'duplicate-owned-gift-links.csv',
+                    rows: state.duplicates,
+                    header: 'entry'
                 },
                 invalid: {
-                    filename: 'malformed-owned-gift-links.txt',
-                    content: state.invalid.join('\n')
+                    txtName: 'malformed-owned-gift-links.txt',
+                    csvName: 'malformed-owned-gift-links.csv',
+                    rows: state.invalid,
+                    header: 'entry'
                 }
             };
 
             const entry = map[kind];
-            if (!entry || !entry.content.trim()) {
+            if (!entry || !entry.rows.length) {
                 log(`Nothing to download for ${kind}.`, 'warning');
                 return;
             }
 
-            const blob = new Blob([entry.content], { type: 'text/plain;charset=utf-8' });
+            const content = format === 'csv'
+                ? [entry.header, ...entry.rows.map(escapeCsvCell)].join('\n')
+                : entry.rows.join('\n');
+
+            const blob = new Blob([content], {
+                type: format === 'csv' ? 'text/csv;charset=utf-8' : 'text/plain;charset=utf-8'
+            });
             const url = URL.createObjectURL(blob);
             const anchor = document.createElement('a');
             anchor.href = url;
-            anchor.download = entry.filename;
+            anchor.download = format === 'csv' ? entry.csvName : entry.txtName;
             document.body.appendChild(anchor);
             anchor.click();
             anchor.remove();
@@ -1777,7 +1893,11 @@ AbCdEf1234567890"></textarea>
         });
 
         document.querySelectorAll('[data-download]').forEach((button) => {
-            button.addEventListener('click', () => downloadText(button.dataset.download));
+            button.addEventListener('click', () => downloadResults(button.dataset.download, 'txt'));
+        });
+
+        document.querySelectorAll('[data-download-csv]').forEach((button) => {
+            button.addEventListener('click', () => downloadResults(button.dataset.downloadCsv, 'csv'));
         });
 
         document.querySelectorAll('[data-copy-target]').forEach((button) => {
