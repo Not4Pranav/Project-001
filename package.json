@@ -2,14 +2,16 @@
   "name": "owned-gift-link-file-checker",
   "private": true,
   "version": "1.0.0",
-  "description": "Safe local-only validator for user-provided gift link files",
+  "description": "Safe local-only generated self-checker for gift link format validation",
   "type": "module",
   "scripts": {
     "check:file": "node cli/owned-gift-link-checker.mjs",
     "check:file:help": "node cli/owned-gift-link-checker.mjs --help",
+    "generate-and-check": "node cli/owned-gift-link-checker.mjs",
+    "self-test": "node cli/owned-gift-link-checker.mjs --self-test",
     "check:cli": "node --check cli/owned-gift-link-checker.mjs && node --check cli/owned-gift-link-worker.mjs",
     "check:browser": "node scripts/check-browser.mjs",
-    "check:all": "npm run check:cli && npm run check:browser",
+    "check:all": "npm run check:cli && npm run check:browser && npm run self-test -- --quiet",
     "benchmark:cli": "node scripts/benchmark-cli.mjs"
   }
 }
