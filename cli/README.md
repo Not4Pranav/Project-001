@@ -5,8 +5,10 @@ Safe local-only processor for files you provide.
 ## What it does
 - streams large input files
 - supports line-based, CSV, gzipped, stdin, and directory batch input
+- supports include/exclude glob filters in directory mode
 - auto or manual CSV column selection
 - parallel local normalization workers
+- parallel file processing in directory mode with bounded worker-budget sharing
 - exact deduplication using disk-backed partitions
 - writes results directly to files for better multi-GB handling
 - supports sharded output files for huge result sets
@@ -138,21 +140,47 @@ Process every regular file in a directory tree:
 npm run check:file -- \
   --input-dir ./incoming \
   --profile turbo \
+  --file-concurrency 4 \
   --output-dir ./output/batch-run
 ```
 
-This creates one subdirectory per input file plus a top-level `batch-summary.json`.
+This creates one subdirectory per input file plus:
+- `batch-summary.json`
+- `batch-summary.csv`
+
+### Directory filters
+
+Include only CSV and gzipped files:
+
+```bash
+npm run check:file -- \
+  --input-dir ./incoming \
+  --include "**/*.csv,**/*.gz" \
+  --output-dir ./output/filtered-run
+```
+
+Exclude archive folders or names:
+
+```bash
+npm run check:file -- \
+  --input-dir ./incoming \
+  --exclude "**/archive/**,*backup*" \
+  --output-dir ./output/no-archive-run
+```
 
 ## Useful options
-- `--workers 8`
-- `--chunk-size 20000`
-- `--buckets 256`
+- `--workers 16`
+- `--file-concurrency 4`
+- `--chunk-size 50000`
+- `--buckets 512`
 - `--shard-size 1000000`
 - `--output-format txt|jsonl|both`
 - `--gzip-output true`
+- `--include "**/*.csv,**/*.txt.gz"`
+- `--exclude "**/archive/**,*backup*"`
 - `--webhook-url https://example.com/webhook`
-- `--webhook-concurrency 4`
-- `--webhook-batch-size 50`
+- `--webhook-concurrency 8`
+- `--webhook-batch-size 100`
 - `--quiet`
 
 ## Outputs
@@ -164,11 +192,13 @@ This creates one subdirectory per input file plus a top-level `batch-summary.jso
 - `summary.json`
 - `checkpoint.json`
 - `batch-summary.json` in directory mode
+- `batch-summary.csv` in directory mode
 
 ## Notes for large files
 - Use `--profile turbo` for stronger CPUs.
 - Increase `--chunk-size` for very large files if memory allows.
 - Increase `--workers` up to your CPU core count.
+- In directory mode, `--workers` acts as the total worker budget and `--file-concurrency` splits that budget across active files.
 - Exact dedupe is done in partitions on disk, which scales better than holding everything in memory.
 - Use `--shard-size` when output files may become very large.
 - Use `--output-format jsonl` or `both` when downstream tooling prefers structured lines.

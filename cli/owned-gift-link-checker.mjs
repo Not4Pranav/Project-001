@@ -10,13 +10,15 @@ import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_WORKERS = Math.max(1, Math.min(8, os.cpus().length || 1));
+const DEFAULT_WORKERS = Math.max(1, Math.min(16, os.cpus().length || 1));
 const DEFAULT_BUCKETS = 128;
 const CHECKPOINT_VERSION = 2;
+const DEDUPE_FLUSH_SIZE = 20_000;
+const PHASE_ONE_QUEUE_MULTIPLIER = 4;
 const PROFILES = {
-  normal: { workers: 1, chunkSize: 2_000, webhookConcurrency: 1, webhookBatchSize: 10, buckets: 64 },
-  fast: { workers: Math.min(2, DEFAULT_WORKERS), chunkSize: 8_000, webhookConcurrency: 2, webhookBatchSize: 25, buckets: 128 },
-  turbo: { workers: DEFAULT_WORKERS, chunkSize: 20_000, webhookConcurrency: 4, webhookBatchSize: 50, buckets: 256 },
+  normal: { workers: 1, chunkSize: 4_000, webhookConcurrency: 1, webhookBatchSize: 10, buckets: 64 },
+  fast: { workers: Math.min(4, DEFAULT_WORKERS), chunkSize: 16_000, webhookConcurrency: 2, webhookBatchSize: 25, buckets: 256 },
+  turbo: { workers: DEFAULT_WORKERS, chunkSize: 50_000, webhookConcurrency: 8, webhookBatchSize: 100, buckets: 512 },
 };
 
 function printHelp() {
@@ -49,7 +51,10 @@ Optional:
   --gzip <auto|true|false>         Gzip input handling (default: auto)
   --gzip-output <true|false>       Compress result outputs as .gz (default: false)
   --output-format <txt|jsonl|both> Result output format(s) (default: txt)
-  --workers <n>                    Worker threads (default from profile)
+  --include <glob[,glob...]>       Directory mode include glob(s)
+  --exclude <glob[,glob...]>       Directory mode exclude glob(s)
+  --file-concurrency <n>           Directory mode parallel files (default from profile)
+  --workers <n>                    Worker thread budget (single file) or total worker budget (directory mode)
   --chunk-size <n>                 Rows per worker batch (default from profile)
   --buckets <n>                    Temp dedupe partitions (default from profile)
   --shard-size <n>                 Max lines per output shard, 0=single file (default: 0)
@@ -87,6 +92,9 @@ function parseArgs(argv) {
     resume: false,
     stdin: false,
     inputDir: null,
+    include: [],
+    exclude: [],
+    fileConcurrency: null,
     shardSize: 0,
     quiet: false,
     keepTemp: false,
@@ -111,6 +119,14 @@ function parseArgs(argv) {
         break;
       case '--input-dir':
         args.inputDir = path.resolve(process.cwd(), next);
+        index += 1;
+        break;
+      case '--include':
+        args.include.push(...String(next || '').split(',').map((value) => value.trim()).filter(Boolean));
+        index += 1;
+        break;
+      case '--exclude':
+        args.exclude.push(...String(next || '').split(',').map((value) => value.trim()).filter(Boolean));
         index += 1;
         break;
       case '--output-dir':
@@ -148,6 +164,10 @@ function parseArgs(argv) {
         break;
       case '--output-format':
         args.outputFormat = next;
+        index += 1;
+        break;
+      case '--file-concurrency':
+        args.fileConcurrency = Number.parseInt(next, 10);
         index += 1;
         break;
       case '--workers':
@@ -235,6 +255,7 @@ function resolveSettings(rawArgs) {
   const inputDir = rawArgs.inputDir ? path.resolve(process.cwd(), rawArgs.inputDir) : null;
   const input = stdin ? null : rawArgs.input ? path.resolve(process.cwd(), rawArgs.input) : undefined;
   const checkpointFile = rawArgs.checkpointFile || path.join(rawArgs.outputDir, 'checkpoint.json');
+  const defaultFileConcurrency = inputDir ? Math.max(1, Math.min(4, profile.workers)) : 1;
   const settings = {
     ...rawArgs,
     stdin,
@@ -244,6 +265,7 @@ function resolveSettings(rawArgs) {
     checkpointFile,
     gzip: resolveGzipMode(rawArgs.gzip),
     workers: clampInt(rawArgs.workers, 1, 32, profile.workers),
+    fileConcurrency: clampInt(rawArgs.fileConcurrency, 1, 16, defaultFileConcurrency),
     chunkSize: clampInt(rawArgs.chunkSize, 100, 250_000, profile.chunkSize),
     webhookConcurrency: clampInt(rawArgs.webhookConcurrency, 1, 32, profile.webhookConcurrency),
     webhookBatchSize: clampInt(rawArgs.webhookBatchSize, 1, 5_000, profile.webhookBatchSize),
@@ -773,6 +795,8 @@ function buildCheckpointPayload(phase, settings, stats, outputFiles, extra = {})
       inputLabel: settings.inputLabel,
       stdin: settings.stdin,
       inputDir: settings.inputDir,
+      include: settings.include,
+      exclude: settings.exclude,
       profile: settings.profile,
       format: settings.format,
       delimiter: settings.delimiter,
@@ -782,6 +806,7 @@ function buildCheckpointPayload(phase, settings, stats, outputFiles, extra = {})
       gzipOutput: settings.gzipOutput,
       outputFormat: settings.outputFormat,
       workers: settings.workers,
+      fileConcurrency: settings.fileConcurrency,
       chunkSize: settings.chunkSize,
       buckets: settings.buckets,
       shardSize: settings.shardSize,
@@ -895,7 +920,7 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
       .finally(() => inflight.delete(task));
     inflight.add(task);
 
-    if (inflight.size >= settings.workers * 2) {
+    if (inflight.size >= Math.max(2, settings.workers * PHASE_ONE_QUEUE_MULTIPLIER)) {
       await Promise.race(inflight);
     }
   };
@@ -977,10 +1002,10 @@ async function phaseTwoDedupe(settings, logger, stats, tempInfo, outputFiles) {
       const validBatch = [];
       const duplicateBatch = [];
       const flushIfNeeded = async (force = false) => {
-        if (force || validBatch.length >= 5000) {
+        if (force || validBatch.length >= DEDUPE_FLUSH_SIZE) {
           await writeToAllWriters(validWriters, validBatch.splice(0, validBatch.length));
         }
-        if (force || duplicateBatch.length >= 5000) {
+        if (force || duplicateBatch.length >= DEDUPE_FLUSH_SIZE) {
           await writeToAllWriters(duplicateWriters, duplicateBatch.splice(0, duplicateBatch.length));
         }
       };
@@ -1172,6 +1197,8 @@ function buildSummary(settings, stats, outputFiles) {
       gzipOutput: settings.gzipOutput,
       outputFormat: settings.outputFormat,
       outputDir: outputFiles.outputDir,
+      include: settings.include,
+      exclude: settings.exclude,
       profile: settings.profile,
       format: settings.format,
       resolvedFormat: stats.inputFormatResolved,
@@ -1180,6 +1207,7 @@ function buildSummary(settings, stats, outputFiles) {
       csvColumnResolved: stats.csvColumnResolved,
       header: settings.header,
       workers: settings.workers,
+      fileConcurrency: settings.fileConcurrency,
       chunkSize: settings.chunkSize,
       buckets: settings.buckets,
       shardSize: settings.shardSize,
@@ -1247,6 +1275,86 @@ function stripKnownExtensions(filePath) {
   return filePath.replace(/\.[^.]+$/, '');
 }
 
+function globToRegExp(pattern) {
+  const normalized = String(pattern || '').replace(/\\/g, '/');
+  let regex = '^';
+
+  for (let index = 0; index < normalized.length; index += 1) {
+    const char = normalized[index];
+    const next = normalized[index + 1];
+    const nextTwo = normalized[index + 2];
+
+    if (char === '*') {
+      if (next === '*' && nextTwo === '/') {
+        regex += '(?:.*\/)?';
+        index += 2;
+      } else if (next === '*') {
+        regex += '.*';
+        index += 1;
+      } else {
+        regex += '[^/]*';
+      }
+    } else if (char === '?') {
+      regex += '[^/]';
+    } else {
+      regex += char.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+    }
+  }
+
+  regex += '$';
+  return new RegExp(regex);
+}
+
+function normalizeGlobPatterns(patterns = []) {
+  return patterns
+    .flatMap((pattern) => String(pattern || '').split(','))
+    .map((pattern) => pattern.trim())
+    .filter(Boolean)
+    .map((pattern) => ({ pattern, regex: globToRegExp(pattern) }));
+}
+
+function matchesAnyGlob(relativePath, compiledPatterns) {
+  if (!compiledPatterns.length) return false;
+  const normalizedPath = relativePath.split(path.sep).join('/');
+  return compiledPatterns.some(({ regex }) => regex.test(normalizedPath));
+}
+
+function escapeCsvValue(value) {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`;
+}
+
+function buildBatchSummaryCsv(batchSummary) {
+  const rows = [
+    [
+      'input',
+      'outputDir',
+      'processed',
+      'validUnique',
+      'duplicates',
+      'invalid',
+      'averageRowsPerMinute',
+      'elapsedHuman',
+      'summary',
+    ].join(','),
+  ];
+
+  for (const file of batchSummary.files) {
+    rows.push([
+      escapeCsvValue(file.input),
+      escapeCsvValue(file.outputDir),
+      file.processed,
+      file.validUnique,
+      file.duplicates,
+      file.invalid,
+      file.averageRowsPerMinute,
+      escapeCsvValue(file.elapsedHuman),
+      escapeCsvValue(file.summary),
+    ].join(','));
+  }
+
+  return `${rows.join('\n')}\n`;
+}
+
 async function collectFilesRecursive(directory) {
   const output = [];
   const entries = await fsp.readdir(directory, { withFileTypes: true });
@@ -1261,6 +1369,18 @@ async function collectFilesRecursive(directory) {
   }
   output.sort();
   return output;
+}
+
+function filterFilesForDirectoryMode(files, inputDir, includePatterns, excludePatterns) {
+  const compiledIncludes = normalizeGlobPatterns(includePatterns);
+  const compiledExcludes = normalizeGlobPatterns(excludePatterns);
+
+  return files.filter((filePath) => {
+    const relative = path.relative(inputDir, filePath).split(path.sep).join('/');
+    const included = !compiledIncludes.length || matchesAnyGlob(relative, compiledIncludes);
+    const excluded = compiledExcludes.length && matchesAnyGlob(relative, compiledExcludes);
+    return included && !excluded;
+  });
 }
 
 function deriveJobOutputDir(baseOutputDir, inputDir, filePath) {
@@ -1335,43 +1455,75 @@ async function processSingleInput(settings) {
 
 async function processDirectory(settings) {
   const logger = createLogger(settings.quiet);
-  const files = await collectFilesRecursive(settings.inputDir);
+  const discoveredFiles = await collectFilesRecursive(settings.inputDir);
+  const files = filterFilesForDirectoryMode(discoveredFiles, settings.inputDir, settings.include, settings.exclude);
   if (!files.length) {
-    throw new Error('Input directory does not contain any regular files');
+    throw new Error('Input directory does not contain any matching regular files');
   }
 
   await ensureDir(settings.outputDir);
   const batchStartedAt = Date.now();
-  const summaries = [];
+  const summaries = new Array(files.length);
   let batchProcessed = 0;
   let batchValid = 0;
   let batchDuplicates = 0;
   let batchInvalid = 0;
+  let completedFiles = 0;
+  let nextIndex = 0;
 
-  logger.info(`directory mode: found ${files.length.toLocaleString()} file(s)`);
+  const effectiveFileConcurrency = Math.max(1, Math.min(settings.fileConcurrency, files.length, settings.workers));
+  const workerAllocation = Array.from({ length: effectiveFileConcurrency }, (_, slot) => (
+    Math.floor(settings.workers / effectiveFileConcurrency) + (slot < (settings.workers % effectiveFileConcurrency) ? 1 : 0)
+  ));
 
-  for (let index = 0; index < files.length; index += 1) {
-    const filePath = files[index];
-    const jobOutputDir = deriveJobOutputDir(settings.outputDir, settings.inputDir, filePath);
-    const jobSettings = {
-      ...settings,
-      input: filePath,
-      stdin: false,
-      inputDir: null,
-      inputLabel: filePath,
-      outputDir: jobOutputDir,
-      checkpointFile: path.join(jobOutputDir, path.basename(settings.checkpointFile)),
-      resume: settings.resume,
-    };
+  logger.info(`directory mode: found ${discoveredFiles.length.toLocaleString()} file(s), matched ${files.length.toLocaleString()} after filters`);
+  logger.info(`directory mode: fileConcurrency=${effectiveFileConcurrency}, totalWorkerBudget=${settings.workers}, perSlotWorkers=${workerAllocation.join(',')}`);
+  if (settings.include.length) logger.info(`include filters: ${settings.include.join(', ')}`);
+  if (settings.exclude.length) logger.info(`exclude filters: ${settings.exclude.join(', ')}`);
 
-    logger.info(`batch ${index + 1}/${files.length}: ${filePath}`);
-    const summary = await processSingleInput(jobSettings);
-    summaries.push(summary);
-    batchProcessed += summary.stats.processed;
-    batchValid += summary.stats.validUnique;
-    batchDuplicates += summary.stats.duplicates;
-    batchInvalid += summary.stats.invalid;
-  }
+  const runSlot = async (slot) => {
+    const slotWorkers = Math.max(1, workerAllocation[slot] || 1);
+
+    while (nextIndex < files.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      const filePath = files[index];
+      const jobOutputDir = deriveJobOutputDir(settings.outputDir, settings.inputDir, filePath);
+      const jobSettings = {
+        ...settings,
+        input: filePath,
+        stdin: false,
+        inputDir: null,
+        include: [],
+        exclude: [],
+        inputLabel: filePath,
+        outputDir: jobOutputDir,
+        checkpointFile: path.join(jobOutputDir, path.basename(settings.checkpointFile)),
+        resume: settings.resume,
+        workers: slotWorkers,
+        fileConcurrency: 1,
+      };
+
+      logger.info(`batch ${index + 1}/${files.length} [slot ${slot + 1}/${effectiveFileConcurrency}, workers ${slotWorkers}]: ${filePath}`);
+      const summary = await processSingleInput(jobSettings);
+      summaries[index] = summary;
+      completedFiles += 1;
+      batchProcessed += summary.stats.processed;
+      batchValid += summary.stats.validUnique;
+      batchDuplicates += summary.stats.duplicates;
+      batchInvalid += summary.stats.invalid;
+
+      if (!settings.quiet) {
+        const elapsedMs = Date.now() - batchStartedAt;
+        const fileRate = completedFiles / Math.max(elapsedMs, 1);
+        const remaining = files.length - completedFiles;
+        const etaMs = remaining > 0 ? Math.round(remaining / fileRate) : 0;
+        logger.info(`directory progress: ${completedFiles}/${files.length} files complete | ${batchProcessed.toLocaleString()} rows processed | eta ${humanDuration(etaMs)}`);
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: effectiveFileConcurrency }, (_, slot) => runSlot(slot)));
 
   const elapsedMs = Date.now() - batchStartedAt;
   const batchSummary = {
@@ -1383,6 +1535,8 @@ async function processDirectory(settings) {
     },
     inputDir: settings.inputDir,
     outputDir: settings.outputDir,
+    include: settings.include,
+    exclude: settings.exclude,
     fileCount: files.length,
     elapsedMs,
     elapsedHuman: humanDuration(elapsedMs),
@@ -1392,6 +1546,10 @@ async function processDirectory(settings) {
       validUnique: batchValid,
       duplicates: batchDuplicates,
       invalid: batchInvalid,
+    },
+    summaryFiles: {
+      json: path.join(settings.outputDir, 'batch-summary.json'),
+      csv: path.join(settings.outputDir, 'batch-summary.csv'),
     },
     files: summaries.map((summary) => ({
       input: summary.settings.inputLabel,
@@ -1407,11 +1565,13 @@ async function processDirectory(settings) {
   };
 
   const batchSummaryPath = path.join(settings.outputDir, 'batch-summary.json');
+  const batchSummaryCsvPath = path.join(settings.outputDir, 'batch-summary.csv');
   await fsp.writeFile(batchSummaryPath, `${JSON.stringify(batchSummary, null, 2)}\n`, 'utf8');
+  await fsp.writeFile(batchSummaryCsvPath, buildBatchSummaryCsv(batchSummary), 'utf8');
   logger.info(`batch complete in ${batchSummary.elapsedHuman}`);
   logger.info(`batch processed=${batchProcessed.toLocaleString()} valid=${batchValid.toLocaleString()} duplicates=${batchDuplicates.toLocaleString()} invalid=${batchInvalid.toLocaleString()}`);
   logger.info(`batch average=${batchSummary.averageRowsPerMinute.toLocaleString()} rows/min`);
-  logger.info(`batch summary: ${batchSummaryPath}`);
+  logger.info(`batch summaries: ${batchSummaryPath}, ${batchSummaryCsvPath}`);
 }
 
 async function main() {
