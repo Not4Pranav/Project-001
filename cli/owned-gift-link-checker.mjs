@@ -6,11 +6,13 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import zlib from 'node:zlib';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_WORKERS = Math.max(1, Math.min(16, os.cpus().length || 1));
+const SCRIPT_FILE = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(SCRIPT_FILE);
+const DEFAULT_WORKERS = Math.max(1, Math.min(32, os.availableParallelism?.() || os.cpus().length || 1));
 const DEFAULT_BUCKETS = 128;
 const CHECKPOINT_VERSION = 2;
 const DEDUPE_FLUSH_SIZE = 20_000;
@@ -54,6 +56,8 @@ Optional:
   --include <glob[,glob...]>       Directory mode include glob(s)
   --exclude <glob[,glob...]>       Directory mode exclude glob(s)
   --file-concurrency <n>           Directory mode parallel files (default from profile)
+  --process-mode <auto|inline|child>
+                                   Directory mode execution strategy (default: auto)
   --workers <n>                    Worker thread budget (single file) or total worker budget (directory mode)
   --chunk-size <n>                 Rows per worker batch (default from profile)
   --buckets <n>                    Temp dedupe partitions (default from profile)
@@ -95,6 +99,7 @@ function parseArgs(argv) {
     include: [],
     exclude: [],
     fileConcurrency: null,
+    processMode: 'auto',
     shardSize: 0,
     quiet: false,
     keepTemp: false,
@@ -168,6 +173,10 @@ function parseArgs(argv) {
         break;
       case '--file-concurrency':
         args.fileConcurrency = Number.parseInt(next, 10);
+        index += 1;
+        break;
+      case '--process-mode':
+        args.processMode = next;
         index += 1;
         break;
       case '--workers':
@@ -264,9 +273,10 @@ function resolveSettings(rawArgs) {
     inputLabel: stdin ? 'stdin' : inputDir || input,
     checkpointFile,
     gzip: resolveGzipMode(rawArgs.gzip),
-    workers: clampInt(rawArgs.workers, 1, 32, profile.workers),
+    workers: clampInt(rawArgs.workers, 1, 64, profile.workers),
     fileConcurrency: clampInt(rawArgs.fileConcurrency, 1, 16, defaultFileConcurrency),
-    chunkSize: clampInt(rawArgs.chunkSize, 100, 250_000, profile.chunkSize),
+    processMode: rawArgs.processMode || 'auto',
+    chunkSize: clampInt(rawArgs.chunkSize, 100, 500_000, profile.chunkSize),
     webhookConcurrency: clampInt(rawArgs.webhookConcurrency, 1, 32, profile.webhookConcurrency),
     webhookBatchSize: clampInt(rawArgs.webhookBatchSize, 1, 5_000, profile.webhookBatchSize),
     buckets: clampInt(rawArgs.buckets, 8, 1_024, profile.buckets || DEFAULT_BUCKETS),
@@ -289,6 +299,10 @@ function resolveSettings(rawArgs) {
     throw new Error(`Invalid --output-format: ${settings.outputFormat}`);
   }
 
+  if (!['auto', 'inline', 'child'].includes(settings.processMode)) {
+    throw new Error(`Invalid --process-mode: ${settings.processMode}`);
+  }
+
   if (settings.resume && settings.stdin) {
     throw new Error('--resume is not supported with --stdin');
   }
@@ -304,18 +318,62 @@ function resolveSettings(rawArgs) {
 }
 
 function createLogger(quiet = false) {
+  const useProgress = !quiet && Boolean(process.stdout.isTTY);
+  let hasProgressLine = false;
+
+  function clearProgress() {
+    if (!useProgress || !hasProgressLine) return;
+    readline.clearLine(process.stdout, 0);
+    readline.cursorTo(process.stdout, 0);
+    hasProgressLine = false;
+  }
+
+  function printLine(method, prefix, message, always = false) {
+    clearProgress();
+    if (always || !quiet) {
+      method(`${prefix} ${message}`);
+    }
+  }
+
   return {
     quiet,
+    useProgress,
     info(message) {
-      if (!quiet) console.log(`[info] ${message}`);
+      printLine(console.log, '[info]', message);
     },
     warn(message) {
-      console.warn(`[warn] ${message}`);
+      printLine(console.warn, '[warn]', message, true);
     },
     error(message) {
-      console.error(`[error] ${message}`);
+      printLine(console.error, '[error]', message, true);
     },
+    progress(message) {
+      if (!useProgress) return;
+      readline.clearLine(process.stdout, 0);
+      readline.cursorTo(process.stdout, 0);
+      process.stdout.write(message);
+      hasProgressLine = true;
+    },
+    stopProgress(finalMessage = '') {
+      if (!useProgress) return;
+      clearProgress();
+      if (finalMessage) {
+        console.log(finalMessage);
+      }
+    },
+    clearProgress,
   };
+}
+
+function renderProgressBar(current, total, label, extra = '') {
+  const safeTotal = Math.max(1, total || 1);
+  const ratio = Math.max(0, Math.min(1, current / safeTotal));
+  const width = 26;
+  const filled = Math.round(ratio * width);
+  const bar = `${'█'.repeat(filled)}${'░'.repeat(width - filled)}`;
+  const percent = `${(ratio * 100).toFixed(1)}%`;
+  const detail = extra ? ` | ${extra}` : '';
+  return `${label} [${bar}] ${percent} (${current}/${safeTotal})${detail}`;
 }
 
 function detectDelimiter(line) {
@@ -476,6 +534,21 @@ function humanDuration(ms) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+function beginPhase(stats, phaseKey) {
+  stats.phaseStarts = stats.phaseStarts || {};
+  stats.phaseStarts[phaseKey] = Date.now();
+}
+
+function endPhase(stats, phaseKey) {
+  const startedAt = stats.phaseStarts?.[phaseKey];
+  if (!startedAt) return 0;
+  const elapsed = Date.now() - startedAt;
+  stats.phaseTimings = stats.phaseTimings || {};
+  stats.phaseTimings[phaseKey] = (stats.phaseTimings[phaseKey] || 0) + elapsed;
+  delete stats.phaseStarts[phaseKey];
+  return elapsed;
 }
 
 async function ensureDir(directoryPath) {
@@ -807,6 +880,7 @@ function buildCheckpointPayload(phase, settings, stats, outputFiles, extra = {})
       outputFormat: settings.outputFormat,
       workers: settings.workers,
       fileConcurrency: settings.fileConcurrency,
+      processMode: settings.processMode,
       chunkSize: settings.chunkSize,
       buckets: settings.buckets,
       shardSize: settings.shardSize,
@@ -839,6 +913,8 @@ function validateResumeCompatibility(settings, checkpoint) {
 
 function normalizeResumedState(checkpoint, stats, outputFiles) {
   const phase = checkpoint.phase;
+  stats.phaseStarts = {};
+  stats.phaseTimings = stats.phaseTimings || { partitionMs: 0, dedupeMs: 0, webhookMs: 0 };
 
   if (phase === 'phase1-complete') {
     stats.validUnique = 0;
@@ -934,11 +1010,18 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
           const ratio = Math.max(0, Math.min(1, bytesRead / inputHandle.totalBytes));
           const elapsedMs = getElapsedMs(stats);
           const etaMs = ratio > 0 ? Math.max(0, Math.round((elapsedMs / ratio) - elapsedMs)) : 0;
-          logger.info(`phase 1: processed ${stats.processed.toLocaleString()} rows at ~${rpm} rows/min | ${(ratio * 100).toFixed(1)}% input read | eta ${humanDuration(etaMs)}`);
+          const extra = `${stats.processed.toLocaleString()} rows | ~${rpm}/min | eta ${humanDuration(etaMs)}`;
+          if (logger.useProgress) {
+            logger.progress(renderProgressBar(bytesRead, inputHandle.totalBytes, 'phase1', extra));
+          } else {
+            logger.info(`phase 1: processed ${stats.processed.toLocaleString()} rows at ~${rpm} rows/min | ${(ratio * 100).toFixed(1)}% input read | eta ${humanDuration(etaMs)}`);
+          }
+        } else if (logger.useProgress) {
+          logger.progress(`phase1 | ${stats.processed.toLocaleString()} rows | ~${rpm}/min`);
         } else {
           logger.info(`phase 1: processed ${stats.processed.toLocaleString()} rows at ~${rpm} rows/min`);
         }
-      }, 5000);
+      }, logger.useProgress ? 250 : 5000);
 
   try {
     for await (const line of rl) {
@@ -964,6 +1047,7 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
     await Promise.all(inflight);
   } finally {
     if (progressTimer) clearInterval(progressTimer);
+    logger.stopProgress();
     rl.close();
     await pool.destroy();
     await closeAllWriters(invalidWriters);
@@ -989,6 +1073,18 @@ async function phaseOnePartition(settings, logger, stats, outputFiles) {
 async function phaseTwoDedupe(settings, logger, stats, tempInfo, outputFiles) {
   const validWriters = createCategoryWriters(settings, outputFiles.outputDir, 'valid');
   const duplicateWriters = createCategoryWriters(settings, outputFiles.outputDir, 'duplicates');
+  let completedPartitions = 0;
+  const totalPartitions = tempInfo.bucketFiles.length;
+  const progressTimer = settings.quiet
+    ? null
+    : setInterval(() => {
+        const extra = `${completedPartitions}/${totalPartitions} partitions | valid ${stats.validUnique.toLocaleString()} | dup ${stats.duplicates.toLocaleString()}`;
+        if (logger.useProgress) {
+          logger.progress(renderProgressBar(completedPartitions, totalPartitions, 'phase2', extra));
+        } else {
+          logger.info(`phase 2: deduped ${completedPartitions}/${totalPartitions} partitions | valid ${stats.validUnique.toLocaleString()} | dup ${stats.duplicates.toLocaleString()}`);
+        }
+      }, logger.useProgress ? 250 : 5000);
 
   try {
     for (let index = 0; index < tempInfo.bucketFiles.length; index += 1) {
@@ -1025,16 +1121,19 @@ async function phaseTwoDedupe(settings, logger, stats, tempInfo, outputFiles) {
 
       await flushIfNeeded(true);
       rl.close();
+      completedPartitions += 1;
 
       if (!settings.keepTemp) {
         await fsp.rm(bucketFile, { force: true });
       }
 
-      if ((index + 1) % Math.max(1, Math.ceil(tempInfo.bucketFiles.length / 8)) === 0) {
+      if (!logger.useProgress && (index + 1) % Math.max(1, Math.ceil(tempInfo.bucketFiles.length / 8)) === 0) {
         logger.info(`phase 2: deduped ${index + 1}/${tempInfo.bucketFiles.length} partitions`);
       }
     }
   } finally {
+    if (progressTimer) clearInterval(progressTimer);
+    logger.stopProgress();
     await closeAllWriters(validWriters);
     await closeAllWriters(duplicateWriters);
     if (!settings.keepTemp) {
@@ -1081,6 +1180,17 @@ async function phaseThreeWebhook(settings, logger, stats, outputFiles) {
   const inflight = new Set();
   let batch = [];
   let batchIndex = 0;
+  let completedBatches = 0;
+  const progressTimer = settings.quiet
+    ? null
+    : setInterval(() => {
+        const extra = `${completedBatches}/${totalBatches} batches | ok ${stats.webhookDeliveries} | failed ${stats.webhookFailures}`;
+        if (logger.useProgress) {
+          logger.progress(renderProgressBar(completedBatches, totalBatches, 'phase3', extra));
+        } else {
+          logger.info(`phase 3: ${completedBatches}/${totalBatches} webhook batches finished | ok ${stats.webhookDeliveries} | failed ${stats.webhookFailures}`);
+        }
+      }, logger.useProgress ? 250 : 5000);
 
   const sendBatch = async (entries, currentIndex) => {
     const payload = {
@@ -1115,6 +1225,8 @@ async function phaseThreeWebhook(settings, logger, stats, outputFiles) {
     } catch (error) {
       stats.webhookFailures += 1;
       logger.warn(`webhook batch ${currentIndex}/${totalBatches} failed: ${error.message}`);
+    } finally {
+      completedBatches += 1;
     }
   };
 
@@ -1173,10 +1285,15 @@ async function phaseThreeWebhook(settings, logger, stats, outputFiles) {
     }
   }
 
-  if (batch.length) {
-    await queueBatch(batch);
+  try {
+    if (batch.length) {
+      await queueBatch(batch);
+    }
+    await Promise.all(inflight);
+  } finally {
+    if (progressTimer) clearInterval(progressTimer);
+    logger.stopProgress();
   }
-  await Promise.all(inflight);
 }
 
 function buildSummary(settings, stats, outputFiles) {
@@ -1208,6 +1325,7 @@ function buildSummary(settings, stats, outputFiles) {
       header: settings.header,
       workers: settings.workers,
       fileConcurrency: settings.fileConcurrency,
+      processMode: settings.processMode,
       chunkSize: settings.chunkSize,
       buckets: settings.buckets,
       shardSize: settings.shardSize,
@@ -1231,6 +1349,14 @@ function buildSummary(settings, stats, outputFiles) {
       elapsedMs,
       elapsedHuman: humanDuration(elapsedMs),
       averageRowsPerMinute: rowsPerMinute(stats.processed, stats),
+      phaseTimings: {
+        partitionMs: stats.phaseTimings?.partitionMs || 0,
+        partitionHuman: humanDuration(stats.phaseTimings?.partitionMs || 0),
+        dedupeMs: stats.phaseTimings?.dedupeMs || 0,
+        dedupeHuman: humanDuration(stats.phaseTimings?.dedupeMs || 0),
+        webhookMs: stats.phaseTimings?.webhookMs || 0,
+        webhookHuman: humanDuration(stats.phaseTimings?.webhookMs || 0),
+      },
     },
   };
 }
@@ -1251,6 +1377,12 @@ function createInitialStats() {
     inputFormatResolved: 'lines',
     csvColumnResolved: 0,
     csvHeaders: [],
+    phaseTimings: {
+      partitionMs: 0,
+      dedupeMs: 0,
+      webhookMs: 0,
+    },
+    phaseStarts: {},
   };
 }
 
@@ -1334,6 +1466,9 @@ function buildBatchSummaryCsv(batchSummary) {
       'invalid',
       'averageRowsPerMinute',
       'elapsedHuman',
+      'partitionHuman',
+      'dedupeHuman',
+      'webhookHuman',
       'summary',
     ].join(','),
   ];
@@ -1348,6 +1483,9 @@ function buildBatchSummaryCsv(batchSummary) {
       file.invalid,
       file.averageRowsPerMinute,
       escapeCsvValue(file.elapsedHuman),
+      escapeCsvValue(file.phaseTimings?.partitionHuman || '0s'),
+      escapeCsvValue(file.phaseTimings?.dedupeHuman || '0s'),
+      escapeCsvValue(file.phaseTimings?.webhookHuman || '0s'),
       escapeCsvValue(file.summary),
     ].join(','));
   }
@@ -1389,6 +1527,85 @@ function deriveJobOutputDir(baseOutputDir, inputDir, filePath) {
   return path.join(baseOutputDir, sanitizeOutputSegment(withoutExt));
 }
 
+function shouldUseChildProcessMode(settings) {
+  if (!settings.inputDir) return false;
+  if (settings.processMode === 'child') return true;
+  if (settings.processMode === 'inline') return false;
+  return settings.fileConcurrency > 1;
+}
+
+function buildChildArgs(jobSettings) {
+  const args = [
+    SCRIPT_FILE,
+    '--input', jobSettings.input,
+    '--output-dir', jobSettings.outputDir,
+    '--profile', jobSettings.profile,
+    '--format', jobSettings.format,
+    '--delimiter', jobSettings.delimiter,
+    '--column', String(jobSettings.column),
+    '--header', String(jobSettings.header),
+    '--gzip', String(jobSettings.gzip),
+    '--gzip-output', String(jobSettings.gzipOutput),
+    '--output-format', jobSettings.outputFormat,
+    '--workers', String(jobSettings.workers),
+    '--chunk-size', String(jobSettings.chunkSize),
+    '--buckets', String(jobSettings.buckets),
+    '--shard-size', String(jobSettings.shardSize),
+    '--checkpoint-file', jobSettings.checkpointFile,
+    '--webhook-concurrency', String(jobSettings.webhookConcurrency),
+    '--webhook-batch-size', String(jobSettings.webhookBatchSize),
+  ];
+
+  if (jobSettings.webhookUrl) {
+    args.push('--webhook-url', jobSettings.webhookUrl);
+  }
+  if (jobSettings.resume) {
+    args.push('--resume');
+  }
+  if (jobSettings.keepTemp) {
+    args.push('--keep-temp');
+  }
+  if (jobSettings.quiet) {
+    args.push('--quiet');
+  }
+
+  return args;
+}
+
+async function runChildSingleInput(jobSettings) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, buildChildArgs(jobSettings), {
+      cwd: process.cwd(),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let stdoutTail = '';
+    let stderrTail = '';
+    const appendTail = (current, chunk) => `${current}${chunk}`.slice(-8000);
+
+    child.stdout.on('data', (chunk) => {
+      stdoutTail = appendTail(stdoutTail, String(chunk));
+    });
+    child.stderr.on('data', (chunk) => {
+      stderrTail = appendTail(stderrTail, String(chunk));
+    });
+    child.on('error', reject);
+    child.on('close', async (code) => {
+      if (code !== 0) {
+        reject(new Error(`Child process failed for ${jobSettings.input}: ${stderrTail || stdoutTail || `exit ${code}`}`));
+        return;
+      }
+
+      try {
+        const summaryText = await fsp.readFile(path.join(jobSettings.outputDir, 'summary.json'), 'utf8');
+        resolve(JSON.parse(summaryText));
+      } catch (error) {
+        reject(new Error(`Child process finished but summary.json could not be read for ${jobSettings.input}: ${error.message}`));
+      }
+    });
+  });
+}
+
 async function processSingleInput(settings) {
   const logger = createLogger(settings.quiet);
   await ensureDir(settings.outputDir);
@@ -1427,19 +1644,28 @@ async function processSingleInput(settings) {
   let tempInfo = checkpoint?.tempInfo || null;
 
   if (!checkpoint || checkpoint.phase === 'new') {
+    beginPhase(stats, 'partitionMs');
     tempInfo = await phaseOnePartition(settings, logger, stats, outputFiles);
+    const phaseElapsed = endPhase(stats, 'partitionMs');
     await saveCheckpoint(settings.checkpointFile, buildCheckpointPayload('phase1-complete', settings, stats, outputFiles, { tempInfo }));
-    logger.info('checkpoint saved after phase 1');
+    logger.info(`checkpoint saved after phase 1 (${humanDuration(phaseElapsed)})`);
   }
 
   if (!checkpoint || checkpoint.phase === 'phase1-complete' || checkpoint.phase === 'new') {
+    beginPhase(stats, 'dedupeMs');
     await phaseTwoDedupe(settings, logger, stats, tempInfo, outputFiles);
+    const phaseElapsed = endPhase(stats, 'dedupeMs');
     await saveCheckpoint(settings.checkpointFile, buildCheckpointPayload('phase2-complete', settings, stats, outputFiles, { tempInfo }));
-    logger.info('checkpoint saved after phase 2');
+    logger.info(`checkpoint saved after phase 2 (${humanDuration(phaseElapsed)})`);
   }
 
   if (!checkpoint || checkpoint.phase === 'phase2-complete' || checkpoint.phase === 'phase1-complete' || checkpoint.phase === 'new') {
+    beginPhase(stats, 'webhookMs');
     await phaseThreeWebhook(settings, logger, stats, outputFiles);
+    const phaseElapsed = endPhase(stats, 'webhookMs');
+    if (settings.webhookUrl) {
+      logger.info(`webhook phase finished in ${humanDuration(phaseElapsed)}`);
+    }
   }
 
   const summary = buildSummary(settings, stats, outputFiles);
@@ -1449,6 +1675,7 @@ async function processSingleInput(settings) {
   logger.info(`done in ${summary.stats.elapsedHuman}`);
   logger.info(`processed=${summary.stats.processed.toLocaleString()} valid=${summary.stats.validUnique.toLocaleString()} duplicates=${summary.stats.duplicates.toLocaleString()} invalid=${summary.stats.invalid.toLocaleString()}`);
   logger.info(`average=${summary.stats.averageRowsPerMinute.toLocaleString()} rows/min`);
+  logger.info(`phase timings: partition=${summary.stats.phaseTimings.partitionHuman}, dedupe=${summary.stats.phaseTimings.dedupeHuman}, webhook=${summary.stats.phaseTimings.webhookHuman}`);
   logger.info(`outputs: ${outputFiles.outputDir}`);
   return summary;
 }
@@ -1470,6 +1697,7 @@ async function processDirectory(settings) {
   let batchInvalid = 0;
   let completedFiles = 0;
   let nextIndex = 0;
+  const processModeResolved = shouldUseChildProcessMode(settings) ? 'child' : 'inline';
 
   const effectiveFileConcurrency = Math.max(1, Math.min(settings.fileConcurrency, files.length, settings.workers));
   const workerAllocation = Array.from({ length: effectiveFileConcurrency }, (_, slot) => (
@@ -1477,9 +1705,30 @@ async function processDirectory(settings) {
   ));
 
   logger.info(`directory mode: found ${discoveredFiles.length.toLocaleString()} file(s), matched ${files.length.toLocaleString()} after filters`);
-  logger.info(`directory mode: fileConcurrency=${effectiveFileConcurrency}, totalWorkerBudget=${settings.workers}, perSlotWorkers=${workerAllocation.join(',')}`);
+  logger.info(`directory mode: fileConcurrency=${effectiveFileConcurrency}, totalWorkerBudget=${settings.workers}, perSlotWorkers=${workerAllocation.join(',')}, processMode=${processModeResolved}`);
   if (settings.include.length) logger.info(`include filters: ${settings.include.join(', ')}`);
   if (settings.exclude.length) logger.info(`exclude filters: ${settings.exclude.join(', ')}`);
+
+  const progressTimer = settings.quiet
+    ? null
+    : setInterval(() => {
+        const elapsedMs = Date.now() - batchStartedAt;
+        const fileRate = completedFiles / Math.max(elapsedMs, 1);
+        const remaining = files.length - completedFiles;
+        const etaMs = remaining > 0 && fileRate > 0 ? Math.round(remaining / fileRate) : 0;
+        const extra = `${completedFiles}/${files.length} files | ${batchProcessed.toLocaleString()} rows | eta ${humanDuration(etaMs)}`;
+        if (logger.useProgress) {
+          logger.progress(renderProgressBar(completedFiles, files.length, 'batch', extra));
+        } else {
+          logger.info(`directory progress: ${completedFiles}/${files.length} files complete | ${batchProcessed.toLocaleString()} rows processed | eta ${humanDuration(etaMs)}`);
+        }
+      }, logger.useProgress ? 250 : 5000);
+
+  const runSingleJob = async (jobSettings) => {
+    return processModeResolved === 'child'
+      ? runChildSingleInput({ ...jobSettings, quiet: true })
+      : processSingleInput(jobSettings);
+  };
 
   const runSlot = async (slot) => {
     const slotWorkers = Math.max(1, workerAllocation[slot] || 1);
@@ -1502,28 +1751,26 @@ async function processDirectory(settings) {
         resume: settings.resume,
         workers: slotWorkers,
         fileConcurrency: 1,
+        processMode: 'inline',
       };
 
       logger.info(`batch ${index + 1}/${files.length} [slot ${slot + 1}/${effectiveFileConcurrency}, workers ${slotWorkers}]: ${filePath}`);
-      const summary = await processSingleInput(jobSettings);
+      const summary = await runSingleJob(jobSettings);
       summaries[index] = summary;
       completedFiles += 1;
       batchProcessed += summary.stats.processed;
       batchValid += summary.stats.validUnique;
       batchDuplicates += summary.stats.duplicates;
       batchInvalid += summary.stats.invalid;
-
-      if (!settings.quiet) {
-        const elapsedMs = Date.now() - batchStartedAt;
-        const fileRate = completedFiles / Math.max(elapsedMs, 1);
-        const remaining = files.length - completedFiles;
-        const etaMs = remaining > 0 ? Math.round(remaining / fileRate) : 0;
-        logger.info(`directory progress: ${completedFiles}/${files.length} files complete | ${batchProcessed.toLocaleString()} rows processed | eta ${humanDuration(etaMs)}`);
-      }
     }
   };
 
-  await Promise.all(Array.from({ length: effectiveFileConcurrency }, (_, slot) => runSlot(slot)));
+  try {
+    await Promise.all(Array.from({ length: effectiveFileConcurrency }, (_, slot) => runSlot(slot)));
+  } finally {
+    if (progressTimer) clearInterval(progressTimer);
+    logger.stopProgress();
+  }
 
   const elapsedMs = Date.now() - batchStartedAt;
   const batchSummary = {
@@ -1537,6 +1784,9 @@ async function processDirectory(settings) {
     outputDir: settings.outputDir,
     include: settings.include,
     exclude: settings.exclude,
+    processMode: processModeResolved,
+    fileConcurrency: effectiveFileConcurrency,
+    totalWorkerBudget: settings.workers,
     fileCount: files.length,
     elapsedMs,
     elapsedHuman: humanDuration(elapsedMs),
@@ -1560,6 +1810,7 @@ async function processDirectory(settings) {
       invalid: summary.stats.invalid,
       averageRowsPerMinute: summary.stats.averageRowsPerMinute,
       elapsedHuman: summary.stats.elapsedHuman,
+      phaseTimings: summary.stats.phaseTimings,
       summary: summary.files.summary,
     })),
   };

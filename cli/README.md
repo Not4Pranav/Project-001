@@ -9,6 +9,9 @@ Safe local-only processor for files you provide.
 - auto or manual CSV column selection
 - parallel local normalization workers
 - parallel file processing in directory mode with bounded worker-budget sharing
+- optional child-process directory mode for stronger isolation on multi-core machines
+- live terminal progress bars when running in an interactive TTY
+- per-phase timing breakdown in summaries
 - exact deduplication using disk-backed partitions
 - writes results directly to files for better multi-GB handling
 - supports sharded output files for huge result sets
@@ -16,6 +19,7 @@ Safe local-only processor for files you provide.
 - supports optional gzipped result outputs
 - writes checkpoints so later phases can be resumed
 - shows progress logs with rows/min and ETA for file inputs
+- upgrades those progress logs to live single-line progress bars in interactive terminals
 - optional webhook batches for your provided valid entries only
 
 ## What it does not do
@@ -148,6 +152,18 @@ This creates one subdirectory per input file plus:
 - `batch-summary.json`
 - `batch-summary.csv`
 
+By default, directory mode auto-picks inline vs child-process execution. You can force child-process fan-out on stronger machines:
+
+```bash
+npm run check:file -- \
+  --input-dir ./incoming \
+  --profile turbo \
+  --workers 24 \
+  --file-concurrency 6 \
+  --process-mode child \
+  --output-dir ./output/batch-child-run
+```
+
 ### Directory filters
 
 Include only CSV and gzipped files:
@@ -171,6 +187,7 @@ npm run check:file -- \
 ## Useful options
 - `--workers 16`
 - `--file-concurrency 4`
+- `--process-mode auto|inline|child`
 - `--chunk-size 50000`
 - `--buckets 512`
 - `--shard-size 1000000`
@@ -189,7 +206,7 @@ npm run check:file -- \
 - `invalid.txt` or `invalid-0001.txt`, `invalid-0002.txt`, ...
 - optionally `valid.jsonl`, `duplicates.jsonl`, `invalid.jsonl`
 - optionally gzipped `.gz` variants of those outputs
-- `summary.json`
+- `summary.json` (includes per-phase timing breakdown)
 - `checkpoint.json`
 - `batch-summary.json` in directory mode
 - `batch-summary.csv` in directory mode
@@ -199,6 +216,8 @@ npm run check:file -- \
 - Increase `--chunk-size` for very large files if memory allows.
 - Increase `--workers` up to your CPU core count.
 - In directory mode, `--workers` acts as the total worker budget and `--file-concurrency` splits that budget across active files.
+- `--process-mode auto` uses child processes when directory parallelism is greater than 1, otherwise inline execution.
+- Live progress bars appear only in interactive terminals; redirected output falls back to periodic log lines.
 - Exact dedupe is done in partitions on disk, which scales better than holding everything in memory.
 - Use `--shard-size` when output files may become very large.
 - Use `--output-format jsonl` or `both` when downstream tooling prefers structured lines.
