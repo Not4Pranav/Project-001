@@ -37,6 +37,14 @@ Highlights:
 - exits non-zero if expected counts/files do not match
 - keeps all checking local and skips webhooks in self-test mode
 
+## Speed safeguards
+
+The generated self-check path is designed to stay fast:
+- the CLI fixture is streamed from memory, so there is no extra generated input-file read
+- browser self-check skips upload parsing and webhook/network work
+- the tiny generated fixture uses lightweight worker/chunk settings instead of heavy large-file defaults
+- existing worker-based normalization, dedupe, and output code paths are still exercised
+
 ## Quick start
 
 ### Browser UI

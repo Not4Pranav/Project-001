@@ -82,6 +82,16 @@ npm run check:file:help
 Detailed CLI guide:
 - `cli/README.md`
 
+## Speed and reliability checks
+
+Recommended quick check after changes:
+
+```bash
+npm run check:all
+```
+
+This parses the CLI/browser code and runs the generated self-check. The generated fixture is in-memory in the CLI and the browser skips upload/webhook work, so validation stays quick while still exercising normalization, dedupe, invalid-row handling, and report generation.
+
 ## Validation
 
 Run syntax, sanity, and generated self-checks:

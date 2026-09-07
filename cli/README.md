@@ -48,6 +48,14 @@ You can also run the CLI entry without any input flags; it defaults to generated
 node cli/owned-gift-link-checker.mjs
 ```
 
+## Performance safeguards
+
+Generated self-check mode is intentionally lightweight:
+- fixture rows are supplied in memory instead of written and re-read as input
+- webhook delivery is disabled in self-test mode
+- the generated fixture uses small chunk/bucket settings to avoid large-file overhead
+- the same worker normalizer and dedupe/output phases are still exercised, so bugs in the checker path are caught
+
 ## Generated output
 
 By default, self-test output is written to:
