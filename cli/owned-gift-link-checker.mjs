@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import zlib from 'node:zlib';
+import { Readable } from 'node:stream';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
@@ -22,29 +23,67 @@ const PROFILES = {
   fast: { workers: Math.min(4, DEFAULT_WORKERS), chunkSize: 16_000, webhookConcurrency: 2, webhookBatchSize: 25, buckets: 256 },
   turbo: { workers: DEFAULT_WORKERS, chunkSize: 50_000, webhookConcurrency: 8, webhookBatchSize: 100, buckets: 512 },
 };
+const SELF_TEST_ROWS = Object.freeze([
+  'https://discord.gift/LOCAL_TEST_CODE_0001',
+  'LOCAL_TEST_CODE_0002',
+  'https://discord.com/gifts/LOCAL_TEST_CODE_0003?source=self-check',
+  'https://discordapp.com/gifts/LOCAL_TEST_CODE_0004#owned',
+  'https://discord.gift/LOCAL_TEST_CODE_0001',
+  '  LOCAL_TEST_CODE_0002  ',
+  'https://example.com/not-supported/LOCAL_TEST_CODE_0005',
+  'short',
+  'https://discord.gift/contains space',
+  '',
+]);
+const SELF_TEST_EXPECTED = Object.freeze({
+  inputLines: SELF_TEST_ROWS.length,
+  totalRows: 9,
+  processed: 9,
+  phaseOneValidCandidates: 6,
+  validUnique: 4,
+  duplicates: 2,
+  invalid: 3,
+  validEntries: Object.freeze([
+    'https://discord.gift/LOCAL_TEST_CODE_0001',
+    'https://discord.gift/LOCAL_TEST_CODE_0002',
+    'https://discord.gift/LOCAL_TEST_CODE_0003',
+    'https://discord.gift/LOCAL_TEST_CODE_0004',
+  ]),
+  duplicateEntries: Object.freeze([
+    'https://discord.gift/LOCAL_TEST_CODE_0001',
+    'https://discord.gift/LOCAL_TEST_CODE_0002',
+  ]),
+});
 
 function printHelp() {
   console.log(`
-Owned Gift Link File Checker CLI
+Generated Gift Link Format Self-Checker CLI
 
-Safe local-only processing for files you provide. This tool does not generate, brute-force,
-discover, or probe gift links. It only normalizes, validates format, deduplicates, writes results,
-and can optionally send batches of your provided format-valid entries to a webhook.
+Safe local-only generated self-checking by default. With no input, this tool creates a
+fixed synthetic fixture, checks it immediately, and verifies expected output. It does not
+generate random or redeemable gift links, brute-force, discover, or probe services.
+Optional local input modes still only normalize, validate format, deduplicate, and write results.
 
 Usage:
+  node cli/owned-gift-link-checker.mjs
+  node cli/owned-gift-link-checker.mjs --self-test [options]
   node cli/owned-gift-link-checker.mjs --input ./codes.txt [options]
   node cli/owned-gift-link-checker.mjs --input ./codes.txt.gz --gzip auto [options]
   node cli/owned-gift-link-checker.mjs --input-dir ./incoming [options]
   cat ./codes.txt | node cli/owned-gift-link-checker.mjs --stdin [options]
   npm run check:file -- --input ./codes.txt [options]
 
-Required:
-  --input, -i <path>               Path to input file
-  --input-dir <path>               Process all regular files in a directory tree
-  --stdin                          Read input from stdin instead of a file
+Default:
+  No input mode runs --self-test automatically, so nothing has to be uploaded, pasted, or shared.
+
+Input modes:
+  --self-test                      Generate a local synthetic fixture, run the checker, and verify expected results
+  --input, -i <path>               Optional local file path to inspect
+  --input-dir <path>               Optional local directory tree to inspect
+  --stdin                          Optional stdin input instead of a file
 
 Optional:
-  --output-dir, -o <path>          Output directory (default: ./output)
+  --output-dir, -o <path>          Output directory (default: ./output/self-test for generated mode)
   --profile <normal|fast|turbo>    Performance profile (default: fast)
   --format <auto|lines|csv>        Input format (default: auto)
   --delimiter <auto|,|;|tab|pipe>  CSV delimiter (default: auto)
@@ -71,6 +110,11 @@ Optional:
   --keep-temp                      Keep temp partition files
   --help                           Show this help
 
+Self-test:
+  --self-test creates a deterministic local fixture with valid-looking test entries,
+  duplicates, invalid rows, and a blank line, runs the checker, and writes
+  <output-dir>/self-test-report.json. It never calls external services.
+
 Outputs:
   <output-dir>/valid*.txt or valid*.jsonl (optionally .gz)
   <output-dir>/duplicates*.txt or duplicates*.jsonl (optionally .gz)
@@ -93,10 +137,12 @@ function parseArgs(argv) {
     gzipOutput: false,
     outputFormat: 'txt',
     outputDir: path.resolve(process.cwd(), 'output'),
+    outputDirProvided: false,
     checkpointFile: null,
     resume: false,
     stdin: false,
     inputDir: null,
+    selfTest: false,
     include: [],
     exclude: [],
     fileConcurrency: null,
@@ -123,6 +169,9 @@ function parseArgs(argv) {
       case '--stdin':
         args.stdin = true;
         break;
+      case '--self-test':
+        args.selfTest = true;
+        break;
       case '--input-dir':
         args.inputDir = path.resolve(process.cwd(), next);
         index += 1;
@@ -138,6 +187,7 @@ function parseArgs(argv) {
       case '--output-dir':
       case '-o':
         args.outputDir = path.resolve(process.cwd(), next);
+        args.outputDirProvided = true;
         index += 1;
         break;
       case '--profile':
@@ -263,15 +313,23 @@ function resolveSettings(rawArgs) {
   const profile = PROFILES[rawArgs.profile];
   const stdin = rawArgs.stdin || rawArgs.input === '-';
   const inputDir = rawArgs.inputDir ? path.resolve(process.cwd(), rawArgs.inputDir) : null;
-  const input = stdin ? null : rawArgs.input ? path.resolve(process.cwd(), rawArgs.input) : undefined;
-  const checkpointFile = rawArgs.checkpointFile || path.join(rawArgs.outputDir, 'checkpoint.json');
+  const explicitFileInput = Boolean(rawArgs.input && rawArgs.input !== '-');
+  const hasInputMode = stdin || explicitFileInput || Boolean(inputDir) || Boolean(rawArgs.selfTest);
+  const selfTest = Boolean(rawArgs.selfTest || !hasInputMode);
+  const input = stdin || selfTest ? null : explicitFileInput ? path.resolve(process.cwd(), rawArgs.input) : undefined;
+  const outputDir = selfTest && !rawArgs.outputDirProvided
+    ? path.resolve(process.cwd(), 'output', 'self-test')
+    : rawArgs.outputDir;
+  const checkpointFile = rawArgs.checkpointFile || path.join(outputDir, 'checkpoint.json');
   const defaultFileConcurrency = inputDir ? Math.max(1, Math.min(4, profile.workers)) : 1;
   const settings = {
     ...rawArgs,
     stdin,
     inputDir,
+    selfTest,
     input,
-    inputLabel: stdin ? 'stdin' : inputDir || input,
+    outputDir,
+    inputLabel: selfTest ? 'generated synthetic self-test fixture' : stdin ? 'stdin' : inputDir || input,
     checkpointFile,
     gzip: resolveGzipMode(rawArgs.gzip),
     workers: clampInt(rawArgs.workers, 1, 64, profile.workers),
@@ -284,8 +342,8 @@ function resolveSettings(rawArgs) {
     shardSize: clampInt(rawArgs.shardSize, 0, 5_000_000, 0),
   };
 
-  if ([settings.stdin, Boolean(settings.input), Boolean(settings.inputDir)].filter(Boolean).length !== 1) {
-    throw new Error('Use exactly one of --input, --input-dir, or --stdin');
+  if ([settings.stdin, explicitFileInput, Boolean(settings.inputDir), settings.selfTest].filter(Boolean).length !== 1) {
+    throw new Error('Use exactly one of --input, --input-dir, --stdin, or --self-test');
   }
 
   if (!['auto', 'lines', 'csv'].includes(settings.format)) {
@@ -308,7 +366,11 @@ function resolveSettings(rawArgs) {
     throw new Error('--resume is not supported with --stdin');
   }
 
-  if (settings.webhookUrl) {
+  if (settings.resume && settings.selfTest) {
+    throw new Error('--resume is not supported with --self-test');
+  }
+
+  if (settings.webhookUrl && !settings.selfTest) {
     const parsed = new URL(settings.webhookUrl);
     if (parsed.protocol !== 'https:') {
       throw new Error('Webhook URL must use HTTPS');
@@ -793,6 +855,15 @@ function createTextReadStream(filePath) {
 }
 
 function createInputStream(settings) {
+  if (Array.isArray(settings.generatedRows)) {
+    const stream = Readable.from(settings.generatedRows.map((row) => `${row}\n`), { objectMode: false });
+    return {
+      stream,
+      progressBytesReader: null,
+      totalBytes: null,
+    };
+  }
+
   if (settings.stdin) {
     const shouldGunzip = settings.gzip === true;
     const stream = shouldGunzip
@@ -889,6 +960,8 @@ function buildCheckpointPayload(phase, settings, stats, outputFiles, extra = {})
       webhookConcurrency: settings.webhookConcurrency,
       webhookBatchSize: settings.webhookBatchSize,
       keepTemp: settings.keepTemp,
+      selfTestFixture: Boolean(settings.selfTestFixture),
+      generatedRows: Array.isArray(settings.generatedRows) ? settings.generatedRows.length : 0,
     },
     stats: {
       ...stats,
@@ -1301,9 +1374,12 @@ function buildSummary(settings, stats, outputFiles) {
   const elapsedMs = getElapsedMs(stats);
   return {
     safety: {
-      description: 'Local-only processing of user-provided entries.',
+      description: settings.selfTestFixture
+        ? 'Local-only processing of a deterministic synthetic self-test fixture.'
+        : 'Local-only processing of user-provided entries.',
       externalDiscovery: false,
       randomGeneration: false,
+      syntheticFixtureGeneration: Boolean(settings.selfTestFixture),
       liveVerification: false,
     },
     settings: {
@@ -1335,6 +1411,8 @@ function buildSummary(settings, stats, outputFiles) {
       webhookBatchSize: settings.webhookBatchSize,
       keepTemp: settings.keepTemp,
       resume: settings.resume,
+      selfTestFixture: Boolean(settings.selfTestFixture),
+      generatedRows: Array.isArray(settings.generatedRows) ? settings.generatedRows.length : 0,
     },
     files: outputFiles,
     stats: {
@@ -1615,7 +1693,8 @@ async function processSingleInput(settings) {
   const stats = createInitialStats();
 
   let inputStat = null;
-  if (!settings.stdin) {
+  const usingGeneratedRows = Array.isArray(settings.generatedRows);
+  if (!settings.stdin && !usingGeneratedRows) {
     inputStat = await fsp.stat(settings.input);
     if (!inputStat.isFile()) {
       throw new Error('Input path must be a regular file');
@@ -1647,7 +1726,9 @@ async function processSingleInput(settings) {
   logger.info(`input: ${settings.inputLabel}`);
   if (inputStat) logger.info(`size: ${inputStat.size.toLocaleString()} bytes`);
   logger.info(`profile=${settings.profile} workers=${settings.workers} chunkSize=${settings.chunkSize} buckets=${settings.buckets} shardSize=${settings.shardSize || 0} outputFormat=${settings.outputFormat} gzipOutput=${settings.gzipOutput}`);
-  logger.info(`safety: local-only validation of your provided input; no generation or external probing`);
+  logger.info(settings.selfTestFixture
+    ? 'safety: generated local synthetic self-test fixture; no random generation, service probing, claims, or redemption'
+    : 'safety: local-only validation of your provided input; no generation or external probing');
 
   let tempInfo = checkpoint?.tempInfo || null;
 
@@ -1686,6 +1767,171 @@ async function processSingleInput(settings) {
   logger.info(`phase timings: partition=${summary.stats.phaseTimings.partitionHuman}, dedupe=${summary.stats.phaseTimings.dedupeHuman}, webhook=${summary.stats.phaseTimings.webhookHuman}`);
   logger.info(`outputs: ${outputFiles.outputDir}`);
   return summary;
+}
+
+
+function makeSyntheticSelfCheckFixture() {
+  return {
+    rows: SELF_TEST_ROWS.slice(),
+    expected: {
+      ...SELF_TEST_EXPECTED,
+      validEntries: SELF_TEST_EXPECTED.validEntries.slice(),
+      duplicateEntries: SELF_TEST_EXPECTED.duplicateEntries.slice(),
+    },
+  };
+}
+
+async function readPlainOutputLines(files) {
+  const lines = [];
+  for (const filePath of files || []) {
+    const content = await fsp.readFile(filePath, 'utf8');
+    lines.push(...content.split(/\r?\n/).filter((line) => line.length > 0));
+  }
+  return lines;
+}
+function arraysEqualSorted(actual, expected) {
+  const left = actual.slice().sort();
+  const right = expected.slice().sort();
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+async function buildSelfTestReport(summary, expected, fixtureSource, outputDir) {
+  const actual = {
+    inputLines: summary.stats.inputLines,
+    totalRows: summary.stats.totalRows,
+    processed: summary.stats.processed,
+    phaseOneValidCandidates: summary.stats.phaseOneValidCandidates,
+    validUnique: summary.stats.validUnique,
+    duplicates: summary.stats.duplicates,
+    invalid: summary.stats.invalid,
+  };
+
+  const validLines = await readPlainOutputLines(summary.files.validTxtFiles);
+  const duplicateLines = await readPlainOutputLines(summary.files.duplicateTxtFiles);
+  const invalidLines = await readPlainOutputLines(summary.files.invalidTxtFiles);
+  actual.validEntries = validLines;
+  actual.duplicateEntries = duplicateLines;
+  actual.invalidFileRows = invalidLines.length;
+
+  const checks = [];
+  const mismatches = [];
+  for (const [key, expectedValue] of Object.entries(expected)) {
+    if (Array.isArray(expectedValue)) continue;
+    const actualValue = actual[key];
+    const passed = actualValue === expectedValue;
+    checks.push({ name: key, expected: expectedValue, actual: actualValue, passed });
+    if (!passed) mismatches.push(`${key}: expected ${expectedValue}, got ${actualValue}`);
+  }
+
+  const validEntriesPassed = arraysEqualSorted(validLines, expected.validEntries);
+  checks.push({
+    name: 'validEntries',
+    expected: expected.validEntries,
+    actual: validLines,
+    passed: validEntriesPassed,
+  });
+  if (!validEntriesPassed) mismatches.push('validEntries: output contents differ from expected synthetic normalized links');
+
+  const duplicateEntriesPassed = arraysEqualSorted(duplicateLines, expected.duplicateEntries);
+  checks.push({
+    name: 'duplicateEntries',
+    expected: expected.duplicateEntries,
+    actual: duplicateLines,
+    passed: duplicateEntriesPassed,
+  });
+  if (!duplicateEntriesPassed) mismatches.push('duplicateEntries: output contents differ from expected synthetic duplicates');
+
+  const invalidFileRowsPassed = invalidLines.length === expected.invalid;
+  checks.push({
+    name: 'invalidFileRows',
+    expected: expected.invalid,
+    actual: invalidLines.length,
+    passed: invalidFileRowsPassed,
+  });
+  if (!invalidFileRowsPassed) mismatches.push(`invalidFileRows: expected ${expected.invalid}, got ${invalidLines.length}`);
+
+  return {
+    passed: mismatches.length === 0,
+    generatedAt: new Date().toISOString(),
+    description: 'Deterministic local self-test using synthetic fixture rows only.',
+    safety: {
+      externalDiscovery: false,
+      randomGeneration: false,
+      syntheticFixtureGeneration: true,
+      liveVerification: false,
+      webhookDelivery: false,
+    },
+    fixtureSource,
+    outputDir,
+    summaryFile: summary.files.summary,
+    checks,
+    expected,
+    actual,
+    mismatches,
+  };
+}
+
+async function runSelfTest(settings) {
+  const logger = createLogger(settings.quiet);
+  const fixture = makeSyntheticSelfCheckFixture();
+  await ensureDir(settings.outputDir);
+
+  const fixtureSource = 'in-memory deterministic synthetic self-test fixture';
+  const runOutputDir = path.join(settings.outputDir, 'run');
+  const reportFile = path.join(settings.outputDir, 'self-test-report.json');
+
+  logger.info(`self-test: generated ${fixture.expected.inputLines.toLocaleString()} synthetic fixture line(s) in memory`);
+  if (settings.webhookUrl) {
+    logger.warn('self-test ignores webhook options so the generated fixture is never sent anywhere');
+  }
+  logger.info('self-test: running local checker and verifying expected counts/files; no network or webhook is used');
+
+  const jobSettings = {
+    ...settings,
+    selfTest: false,
+    selfTestFixture: true,
+    stdin: false,
+    inputDir: null,
+    input: null,
+    inputLabel: fixtureSource,
+    generatedRows: fixture.rows,
+    outputDir: runOutputDir,
+    checkpointFile: path.join(runOutputDir, 'checkpoint.json'),
+    resume: false,
+    format: 'lines',
+    delimiter: 'auto',
+    column: 'auto',
+    header: true,
+    gzip: false,
+    gzipOutput: false,
+    outputFormat: 'txt',
+    buckets: 8,
+    chunkSize: Math.min(settings.chunkSize, 100),
+    shardSize: 0,
+    webhookUrl: null,
+    webhookConcurrency: 1,
+    webhookBatchSize: 10,
+    workers: 1,
+    fileConcurrency: 1,
+    processMode: 'inline',
+    keepTemp: false,
+  };
+
+  const summary = await processSingleInput(jobSettings);
+  const report = await buildSelfTestReport(summary, fixture.expected, fixtureSource, runOutputDir);
+  await fsp.writeFile(reportFile, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
+
+  if (!report.passed) {
+    logger.error(`self-test failed; report written to ${reportFile}`);
+    for (const mismatch of report.mismatches) {
+      logger.error(`self-test mismatch: ${mismatch}`);
+    }
+    throw new Error('Self-test failed');
+  }
+
+  logger.info(`self-test passed; report written to ${reportFile}`);
+  return report;
 }
 
 async function processDirectory(settings) {
@@ -1844,7 +2090,9 @@ async function main() {
 
   const settings = resolveSettings(rawArgs);
 
-  if (settings.inputDir) {
+  if (settings.selfTest) {
+    await runSelfTest(settings);
+  } else if (settings.inputDir) {
     await processDirectory(settings);
   } else {
     await processSingleInput(settings);

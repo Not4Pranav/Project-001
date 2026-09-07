@@ -1,0 +1,4 @@
+# Generated checker outputs and local scratch data
+output/
+*.tmp
+.DS_Store

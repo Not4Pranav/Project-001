@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Owned Gift Link File Checker</title>
+    <title>Generated Gift Link Format Self-Checker</title>
     <style>
         :root {
             --bg: #0f172a;
@@ -360,46 +360,41 @@
         <section class="card hero">
             <div class="pill-row">
                 <span class="pill">Local-only format validation</span>
-                <span class="pill">Parallel workers + streamed file reading</span>
-                <span class="pill">Concurrent webhook delivery for your provided entries only</span>
+                <span class="pill">Generated synthetic fixture</span>
+                <span class="pill">Immediate self-check on load</span>
             </div>
             <div>
-                <h1>Owned Gift Link File Checker</h1>
+                <h1>Generated Gift Link Format Self-Checker</h1>
                 <p>
-                    Upload a text, CSV, or log file containing gift links or codes you already possess, or paste them manually.
-                    This tool normalizes your input, validates supported formats locally, removes duplicates, processes rows in parallel,
-                    supports large-file streaming, and can optionally notify a webhook with the format-valid entries from your own file or list.
+                    This version no longer asks you to upload, paste, or share a file. It generates a small fixed synthetic fixture locally,
+                    checks it immediately, and verifies that valid, duplicate, and malformed rows match the expected results.
                 </p>
             </div>
             <div class="warning-box">
                 <strong>Safety boundary:</strong>
-                This page does <em>not</em> generate, brute-force, discover, or probe random gift links, and it does not call Discord APIs.
-                It only processes the entries you manually provide by file upload or text input.
+                This page does <em>not</em> generate random or redeemable gift links, brute-force, discover, or probe services, and it does not call Discord APIs.
+                It now generates only a fixed synthetic self-check fixture locally and checks it immediately without user file sharing.
             </div>
         </section>
 
         <section class="grid two">
             <div class="card">
-                <label for="inputLinks">File contents or manual input</label>
-                <div id="uploadBox" class="upload-box">
-                    <strong>Drop a .txt, .csv, or .log file here</strong>
-                    <p>or use the file picker below to load the list you want checked.</p>
-                    <div id="fileMeta" class="file-meta">No file loaded yet.</div>
+                <label for="inputLinks">Generated local fixture</label>
+                <div id="uploadBox" class="upload-box hidden" aria-hidden="true">
+                    <strong>File upload removed</strong>
+                    <p>This version generates its own local fixture instead of asking you to share a file.</p>
+                    <div id="fileMeta" class="file-meta">Generated fixture will be created automatically.</div>
                 </div>
-                <textarea id="inputLinks" placeholder="Upload a file or paste one code/link per line...
-Examples:
-https://discord.gift/AbCdEf1234567890
-https://discord.com/gifts/AbCdEf1234567890
-AbCdEf1234567890"></textarea>
+                <textarea id="inputLinks" readonly placeholder="A fixed synthetic fixture is generated here automatically, then checked immediately."></textarea>
                 <span class="hint">
-                    Accepted formats: <code>discord.gift/&lt;code&gt;</code>, <code>discord.com/gifts/&lt;code&gt;</code>,
-                    <code>discordapp.com/gifts/&lt;code&gt;</code>, or a raw code.
+                    No file upload or paste is required. The generated fixture uses fake local-only entries that exercise supported links, raw codes, duplicates, invalid hosts, malformed rows, and blanks.
                 </span>
 
                 <div class="control-row" style="margin-top: 16px;">
-                    <input id="fileInput" type="file" accept=".txt,.csv,.log" />
-                    <button id="sampleBtn" class="ghost-btn" type="button">Load sample</button>
-                    <button id="clearBtn" class="ghost-btn" type="button">Clear input</button>
+                    <input id="fileInput" class="hidden" type="file" accept=".txt,.csv,.log" aria-hidden="true" tabindex="-1" disabled />
+                    <button id="sampleBtn" class="ghost-btn hidden" type="button" aria-hidden="true" tabindex="-1">Load sample</button>
+                    <button id="selfCheckBtn" class="primary-btn" type="button">Generate &amp; self-check now</button>
+                    <button id="clearBtn" class="ghost-btn hidden" type="button" aria-hidden="true" tabindex="-1">Clear input</button>
                 </div>
             </div>
 
@@ -410,12 +405,12 @@ AbCdEf1234567890"></textarea>
                             <label for="modeSelect">Processing profile</label>
                             <select id="modeSelect">
                                 <option value="normal">Normal</option>
-                                <option value="fast">Fast</option>
+                                <option value="fast" selected>Fast</option>
                                 <option value="turbo">Turbo</option>
                             </select>
-                            <span class="hint">Profiles set sensible defaults. Actual local throughput depends on your device and file shape.</span>
+                            <span class="hint">Profiles set sensible defaults. Actual local throughput depends on your device.</span>
                         </div>
-                        <div>
+                        <div class="hidden" aria-hidden="true">
                             <label for="inputFormatSelect">Input format</label>
                             <select id="inputFormatSelect">
                                 <option value="auto">Auto detect</option>
@@ -430,7 +425,7 @@ AbCdEf1234567890"></textarea>
                         <div>
                             <label for="workerCountInput">Parallel worker threads</label>
                             <input id="workerCountInput" type="number" min="1" max="16" value="4" />
-                            <span class="hint">Higher can be faster for large files, but too many workers may hurt small jobs.</span>
+                            <span class="hint">Higher can be faster for larger generated fixtures, but too many workers may hurt small jobs.</span>
                         </div>
                         <div>
                             <label for="chunkSizeInput">Chunk size</label>
@@ -447,7 +442,7 @@ AbCdEf1234567890"></textarea>
                         </div>
                     </div>
 
-                    <div class="grid three" style="gap: 12px;">
+                    <div class="grid three hidden" style="gap: 12px;" aria-hidden="true">
                         <div>
                             <label for="csvDelimiterSelect">CSV delimiter</label>
                             <select id="csvDelimiterSelect">
@@ -470,7 +465,7 @@ AbCdEf1234567890"></textarea>
                         </div>
                     </div>
 
-                    <div class="grid three" style="gap: 12px;">
+                    <div class="grid three hidden" style="gap: 12px;" aria-hidden="true">
                         <label class="checkbox-row">
                             <input id="csvHeaderCheckbox" type="checkbox" checked />
                             <span>CSV first row is a header</span>
@@ -487,13 +482,13 @@ AbCdEf1234567890"></textarea>
 
                     <div id="engineHint" class="hint">Parallel engine settings will be shown here.</div>
 
-                    <div>
+                    <div class="hidden" aria-hidden="true">
                         <label for="webhookInput">Optional webhook URL</label>
                         <input id="webhookInput" type="url" placeholder="https://example.com/webhook" />
                         <span class="hint">If enabled, the app sends batches of locally validated entries that came from your own file or list.</span>
                     </div>
 
-                    <div class="grid two" style="gap: 12px;">
+                    <div class="grid two hidden" style="gap: 12px;" aria-hidden="true">
                         <label class="checkbox-row">
                             <input id="webhookEnabled" type="checkbox" />
                             <span>
@@ -514,10 +509,10 @@ AbCdEf1234567890"></textarea>
                     </div>
 
                     <div class="control-row">
-                        <button id="startBtn" class="primary-btn" type="button">Start processing</button>
+                        <button id="startBtn" class="primary-btn" type="button">Re-run generated check</button>
                         <button id="pauseBtn" class="ghost-btn" type="button" disabled>Pause</button>
                         <button id="stopBtn" class="danger-btn" type="button" disabled>Stop</button>
-                        <button id="resetBtn" class="ghost-btn" type="button">Reset results</button>
+                        <button id="resetBtn" class="ghost-btn" type="button">Reset generated results</button>
                     </div>
                 </div>
             </div>
@@ -526,7 +521,7 @@ AbCdEf1234567890"></textarea>
         <section class="card">
             <div class="stats">
                 <div class="stat">
-                    <div class="label">Total input rows</div>
+                    <div class="label">Generated rows</div>
                     <div class="value muted-text" id="totalCount">0</div>
                 </div>
                 <div class="stat">
@@ -545,7 +540,7 @@ AbCdEf1234567890"></textarea>
                     <div class="label">Malformed / unsupported</div>
                     <div class="value danger-text" id="invalidCount">0</div>
                 </div>
-                <div class="stat">
+                <div class="stat hidden" aria-hidden="true">
                     <div class="label">Webhook deliveries</div>
                     <div class="value muted-text" id="webhookCount">0</div>
                 </div>
@@ -560,7 +555,7 @@ AbCdEf1234567890"></textarea>
             </div>
 
             <div class="grid" style="margin-top: 16px; gap: 14px;">
-                <div id="status" class="status ready">Ready. Upload a file or paste owned links/codes, then click “Start processing”.</div>
+                <div id="status" class="status ready">Ready. The generated self-check will start automatically.</div>
                 <div class="progress-wrap">
                     <div class="hint"><span id="progressLabel">0 / 0 processed</span></div>
                     <progress id="progressBar" max="1" value="0"></progress>
@@ -570,8 +565,8 @@ AbCdEf1234567890"></textarea>
 
         <section class="card">
             <h2>Results</h2>
-            <p>These are local classification results based on the entries you supplied.</p>
-            <p class="hint" style="margin-top: 8px;">For very large files, use streamed file mode, summary logs, and CSV export to keep browser overhead lower.</p>
+            <p>These are local classification results from the generated synthetic fixture.</p>
+            <p class="hint" style="margin-top: 8px;">The browser version now runs without user file sharing: it generates a small fake fixture locally and checks it immediately.</p>
             <div class="results-grid" style="margin-top: 16px;">
                 <div class="result-panel">
                     <div>
@@ -589,7 +584,7 @@ AbCdEf1234567890"></textarea>
                 <div class="result-panel">
                     <div>
                         <h3>Duplicates</h3>
-                        <p>Duplicate rows are tracked separately so you can clean your inventory list.</p>
+                        <p>Duplicate rows are tracked separately to verify duplicate handling.</p>
                     </div>
                     <textarea id="duplicateOutput" readonly></textarea>
                     <div class="control-row">
@@ -623,8 +618,8 @@ AbCdEf1234567890"></textarea>
             <details>
                 <summary>What this tool does and does not do</summary>
                 <div class="grid" style="gap: 10px; margin-top: 12px;">
-                    <p><strong>Does:</strong> normalize uploaded or pasted entries, validate format, deduplicate, process in parallel local batches, stream large files, export results, and optionally post your provided entries to a webhook.</p>
-                    <p><strong>Does not:</strong> generate random codes, probe external services, verify redemption status, attempt claims, or discover links you did not already supply.</p>
+                    <p><strong>Does:</strong> generate a fixed local synthetic fixture, validate supported formats, deduplicate, classify malformed rows, process with local workers, and export the generated check results.</p>
+                    <p><strong>Does not:</strong> accept user file uploads in the browser UI, generate random or redeemable codes, probe external services, verify redemption status, attempt claims, or discover links.</p>
                 </div>
             </details>
         </section>
@@ -652,7 +647,7 @@ AbCdEf1234567890"></textarea>
             },
             fast: {
                 label: 'Fast',
-                defaultWorkers: Math.min(2, HARDWARE_THREADS),
+                defaultWorkers: Math.min(4, HARDWARE_THREADS),
                 defaultChunkSize: 2000,
                 defaultWebhookConcurrency: 2,
                 defaultWebhookBatchSize: 25,
@@ -674,6 +669,7 @@ AbCdEf1234567890"></textarea>
             uploadBox: document.getElementById('uploadBox'),
             fileMeta: document.getElementById('fileMeta'),
             sampleBtn: document.getElementById('sampleBtn'),
+            selfCheckBtn: document.getElementById('selfCheckBtn'),
             clearBtn: document.getElementById('clearBtn'),
             modeSelect: document.getElementById('modeSelect'),
             inputFormatSelect: document.getElementById('inputFormatSelect'),
@@ -738,7 +734,9 @@ AbCdEf1234567890"></textarea>
             timerId: null,
             usingDirectFile: false,
             approximateInputRows: 0,
-            selectedFilePreviewOnly: false
+            selectedFilePreviewOnly: false,
+            selfCheckActive: false,
+            selfCheckExpected: null
         };
 
         function clampInt(value, min, max, fallback) {
@@ -893,8 +891,12 @@ AbCdEf1234567890"></textarea>
         function updateEngineHint() {
             const settings = readSettings();
             const profile = getCurrentProfile();
-            const source = state.selectedFile && settings.streamFile ? 'uploaded file stream' : 'textarea/manual input';
-            elements.engineHint.textContent = `Detected browser threads: ${HARDWARE_THREADS}. Profile: ${profile.label}. Workers: ${settings.workers}. Chunk size: ${settings.chunkSize}. Source: ${source}. Webhook channels: ${settings.webhookConcurrency}. Webhook batch size: ${settings.webhookBatchSize}. Large inputs auto-switch verbose logs off at ${LARGE_FILE_ROW_THRESHOLD.toLocaleString()}+ rows. ${profile.note}`;
+            const source = state.selfCheckActive
+                ? 'generated local self-check fixture'
+                : state.selectedFile && settings.streamFile ? 'uploaded file stream' : 'textarea/manual input';
+            const effectiveWorkers = state.selfCheckActive ? 1 : settings.workers;
+            const effectiveChunkSize = state.selfCheckActive ? Math.min(settings.chunkSize, 100) : settings.chunkSize;
+            elements.engineHint.textContent = `Detected browser threads: ${HARDWARE_THREADS}. Profile: ${profile.label}. Workers: ${effectiveWorkers}. Chunk size: ${effectiveChunkSize}. Source: ${source}. The generated fixture is checked locally and webhook delivery is skipped. ${profile.note}`;
         }
 
         function estimateCurrentInputRows(useDirectFile) {
@@ -935,7 +937,9 @@ AbCdEf1234567890"></textarea>
             return tuned;
         }
 
-        function resetProcessingState({ keepInput = true, clearLog = false, clearFile = false } = {}) {
+        function resetProcessingState({ keepInput = true, clearLog = false, clearFile = false, preserveSelfCheck = false } = {}) {
+            const preservedSelfCheckExpected = preserveSelfCheck ? state.selfCheckExpected : null;
+            const preservedSelfCheckActive = preserveSelfCheck ? state.selfCheckActive : false;
             state.pendingChunks = [];
             state.queueWaiters = [];
             state.pauseWaiters = [];
@@ -956,6 +960,8 @@ AbCdEf1234567890"></textarea>
             state.startedAt = 0;
             state.usingDirectFile = false;
             state.approximateInputRows = 0;
+            state.selfCheckExpected = preservedSelfCheckExpected;
+            state.selfCheckActive = preservedSelfCheckActive;
             if (clearFile) {
                 state.selectedFilePreviewOnly = false;
             }
@@ -981,7 +987,7 @@ AbCdEf1234567890"></textarea>
             elements.stopBtn.disabled = true;
             updateStats({ syncText: true, force: true });
             updateEngineHint();
-            setStatus('Ready. Upload a file or paste owned links/codes, then click “Start processing”.', 'ready');
+            setStatus('Ready. Click “Generate & self-check now” or “Re-run generated check” to create and verify the fixture again.', 'ready');
         }
 
         function isValidCodeFast(value) {
@@ -1060,6 +1066,82 @@ AbCdEf1234567890"></textarea>
             return {
                 kind: 'valid',
                 normalized: `https://discord.gift/${code}`
+            };
+        }
+
+        function buildSyntheticSelfCheckFixture() {
+            const rows = [
+                'https://discord.gift/LOCAL_TEST_CODE_0001',
+                'LOCAL_TEST_CODE_0002',
+                'https://discord.com/gifts/LOCAL_TEST_CODE_0003?source=self-check',
+                'https://discordapp.com/gifts/LOCAL_TEST_CODE_0004#owned',
+                'https://discord.gift/LOCAL_TEST_CODE_0001',
+                '  LOCAL_TEST_CODE_0002  ',
+                'https://example.com/not-supported/LOCAL_TEST_CODE_0005',
+                'short',
+                'https://discord.gift/contains space',
+                ''
+            ];
+
+            return {
+                rows,
+                text: rows.join('\n'),
+                expected: {
+                    totalRows: 9,
+                    processed: 9,
+                    validUnique: 4,
+                    duplicates: 2,
+                    invalid: 3,
+                    validEntries: [
+                        'https://discord.gift/LOCAL_TEST_CODE_0001',
+                        'https://discord.gift/LOCAL_TEST_CODE_0002',
+                        'https://discord.gift/LOCAL_TEST_CODE_0003',
+                        'https://discord.gift/LOCAL_TEST_CODE_0004'
+                    ],
+                    duplicateEntries: [
+                        'https://discord.gift/LOCAL_TEST_CODE_0001',
+                        'https://discord.gift/LOCAL_TEST_CODE_0002'
+                    ]
+                }
+            };
+        }
+
+        function arraysEqualSorted(actual, expected) {
+            const left = actual.slice().sort();
+            const right = expected.slice().sort();
+            if (left.length !== right.length) return false;
+            return left.every((value, index) => value === right[index]);
+        }
+
+        function validateSyntheticSelfCheck() {
+            const expected = state.selfCheckExpected;
+            if (!expected) return { passed: true, mismatches: [] };
+
+            const mismatches = [];
+            const scalarChecks = [
+                ['totalRows', state.totalRows],
+                ['processed', state.processed],
+                ['validUnique', state.valid.length],
+                ['duplicates', state.duplicates.length],
+                ['invalid', state.invalid.length]
+            ];
+
+            for (const [name, actual] of scalarChecks) {
+                if (actual !== expected[name]) {
+                    mismatches.push(`${name}: expected ${expected[name]}, got ${actual}`);
+                }
+            }
+
+            if (!arraysEqualSorted(state.valid, expected.validEntries)) {
+                mismatches.push('validEntries: normalized output differs from expected synthetic entries');
+            }
+            if (!arraysEqualSorted(state.duplicates, expected.duplicateEntries)) {
+                mismatches.push('duplicateEntries: duplicate output differs from expected synthetic entries');
+            }
+
+            return {
+                passed: mismatches.length === 0,
+                mismatches
             };
         }
 
@@ -1182,6 +1264,8 @@ AbCdEf1234567890"></textarea>
         async function inspectSelectedFile(file) {
             if (!file) return;
             state.selectedFile = file;
+            state.selfCheckActive = false;
+            state.selfCheckExpected = null;
             const previewLimit = 512 * 1024;
             const previewText = await file.slice(0, previewLimit).text();
             const isLarge = file.size > previewLimit;
@@ -1608,10 +1692,12 @@ AbCdEf1234567890"></textarea>
         async function startProcessing() {
             if (state.isRunning) return;
 
+            const pendingSelfCheck = state.selfCheckExpected;
+            const pendingSelfCheckActive = state.selfCheckActive;
             const settings = readSettings();
             let useDirectFile = Boolean(state.selectedFile && settings.streamFile);
 
-            if (settings.webhookEnabled) {
+            if (settings.webhookEnabled && !pendingSelfCheck) {
                 if (!settings.webhookUrl) {
                     setStatus('Webhook is enabled but no HTTPS webhook URL was provided.', 'error');
                     log('Start blocked: webhook delivery was enabled without a URL.', 'error');
@@ -1649,14 +1735,22 @@ AbCdEf1234567890"></textarea>
             const hasManualInput = Boolean(elements.inputLinks.value.trim());
             useDirectFile = Boolean(state.selectedFile && settings.streamFile);
             if (!useDirectFile && !hasManualInput) {
-                setStatus('Please upload a file or paste at least one owned gift link or code before starting.', 'error');
-                log('Start blocked: no input rows found.', 'error');
+                setStatus('No generated fixture is loaded yet. Click “Generate & self-check now”.', 'error');
+                log('Start blocked: no generated fixture rows found.', 'error');
                 return;
             }
 
             const tunedSettings = autoTuneSettings(settings, useDirectFile);
-            resetProcessingState({ keepInput: true, clearLog: false, clearFile: false });
+            resetProcessingState({ keepInput: true, clearLog: false, clearFile: false, preserveSelfCheck: Boolean(pendingSelfCheck) });
+            state.selfCheckExpected = pendingSelfCheck;
+            state.selfCheckActive = pendingSelfCheckActive;
             const activeSettings = { ...readSettings(), ...tunedSettings };
+            if (pendingSelfCheck) {
+                activeSettings.webhookEnabled = false;
+                activeSettings.webhookUrl = '';
+                activeSettings.workers = 1;
+                activeSettings.chunkSize = Math.min(activeSettings.chunkSize, 100);
+            }
             state.isRunning = true;
             state.startedAt = Date.now();
             state.usingDirectFile = useDirectFile;
@@ -1667,8 +1761,11 @@ AbCdEf1234567890"></textarea>
             updateEngineHint();
             updateStats({ force: true });
             const estimatedRows = estimateCurrentInputRows(useDirectFile);
-            setStatus(`Processing started using ${useDirectFile ? 'uploaded file stream' : 'textarea input'} with ${activeSettings.workers} worker(s).`, 'running');
-            log(`Processing started. Source: ${useDirectFile ? 'uploaded file stream' : 'textarea/manual input'}. Estimated rows: ${estimatedRows.toLocaleString() || 'unknown'}.`, 'info');
+            const activeSource = state.selfCheckActive
+                ? 'generated self-check fixture'
+                : useDirectFile ? 'uploaded file stream' : 'textarea/manual input';
+            setStatus(`Processing started using ${activeSource} with ${activeSettings.workers} worker(s).`, 'running');
+            log(`Processing started. Source: ${activeSource}. Estimated rows: ${estimatedRows.toLocaleString() || 'unknown'}.`, 'info');
 
             try {
                 const producerPromise = useDirectFile ? produceFromFile(activeSettings) : produceFromText(activeSettings);
@@ -1687,6 +1784,17 @@ AbCdEf1234567890"></textarea>
                         setStatus(`Local processing complete. Webhook delivered ${state.webhookDeliveries}/${Math.ceil(state.valid.length / activeSettings.webhookBatchSize)} batch(es).`, 'error');
                     } else if (activeSettings.webhookEnabled) {
                         setStatus('Completed local processing and webhook delivery for your supplied entries.', 'done');
+                    }
+
+                    if (state.selfCheckExpected) {
+                        const selfCheck = validateSyntheticSelfCheck();
+                        if (selfCheck.passed) {
+                            log('Generated self-check passed: expected valid, duplicate, and malformed counts matched.', 'success');
+                            setStatus('Generated self-check passed. The local checker matched all expected results.', 'done');
+                        } else {
+                            selfCheck.mismatches.forEach((mismatch) => log(`Self-check mismatch: ${mismatch}`, 'error'));
+                            setStatus('Generated self-check failed. Review the log for mismatched counts.', 'error');
+                        }
                     }
                 }
             } catch (error) {
@@ -1847,6 +1955,8 @@ AbCdEf1234567890"></textarea>
             ].join('\n');
             state.selectedFile = null;
             state.selectedFilePreviewOnly = false;
+            state.selfCheckActive = false;
+            state.selfCheckExpected = null;
             elements.fileInput.value = '';
             elements.fileMeta.textContent = 'Using built-in sample data.';
             elements.inputLinks.value = sample;
@@ -1857,9 +1967,39 @@ AbCdEf1234567890"></textarea>
             setStatus('Sample data loaded. Click “Start processing” to test the checker.', 'ready');
         });
 
+        async function runGeneratedSelfCheck({ automatic = false } = {}) {
+            if (state.isRunning) return;
+            const fixture = buildSyntheticSelfCheckFixture();
+            state.selectedFile = null;
+            state.selectedFilePreviewOnly = false;
+            state.selfCheckActive = true;
+            state.selfCheckExpected = fixture.expected;
+            elements.fileInput.value = '';
+            elements.inputFormatSelect.value = 'lines';
+            elements.webhookEnabled.checked = false;
+            elements.fileMeta.textContent = `Using generated synthetic self-check fixture with ${fixture.rows.length.toLocaleString()} line(s).`;
+            elements.inputLinks.value = fixture.text;
+            await inspectCsvColumnsFromText(fixture.text);
+            updateEngineHint();
+            saveSettingsToStorage();
+            log(`${automatic ? 'Auto-generated' : 'Generated'} synthetic self-check fixture. Starting local validation immediately; webhook delivery is skipped.`, 'info');
+            setStatus('Generated self-check fixture. Starting local validation...', 'running');
+            await startProcessing();
+        }
+
+        elements.selfCheckBtn.addEventListener('click', () => {
+            runGeneratedSelfCheck().catch((error) => {
+                console.error(error);
+                setStatus(error.message || 'Generated self-check failed to start.', 'error');
+                log(error.message || 'Generated self-check failed to start.', 'error');
+            });
+        });
+
         elements.clearBtn.addEventListener('click', () => {
             state.selectedFile = null;
             state.selectedFilePreviewOnly = false;
+            state.selfCheckActive = false;
+            state.selfCheckExpected = null;
             elements.inputLinks.value = '';
             elements.fileInput.value = '';
             elements.fileMeta.textContent = 'No file loaded yet.';
@@ -1867,7 +2007,7 @@ AbCdEf1234567890"></textarea>
             updateEngineHint();
             saveSettingsToStorage();
             log('Input cleared.', 'info');
-            setStatus('Ready. Upload a file or paste owned links/codes, then click “Start processing”.', 'ready');
+            setStatus('Ready. Click “Generate & self-check now” to create and verify the fixture again.', 'ready');
         });
 
         elements.modeSelect.addEventListener('change', () => {
@@ -1901,6 +2041,8 @@ AbCdEf1234567890"></textarea>
             maybeSaveOnChange();
         });
         elements.inputLinks.addEventListener('input', async () => {
+            state.selfCheckActive = false;
+            state.selfCheckExpected = null;
             if (!state.selectedFile || !elements.streamFileCheckbox.checked) {
                 await inspectCsvColumnsFromText(elements.inputLinks.value.slice(0, 50000));
             }
@@ -1928,7 +2070,13 @@ AbCdEf1234567890"></textarea>
             elements.logModeSelect
         ].forEach((el) => el.addEventListener('change', maybeSaveOnChange));
 
-        elements.startBtn.addEventListener('click', startProcessing);
+        elements.startBtn.addEventListener('click', () => {
+            runGeneratedSelfCheck().catch((error) => {
+                console.error(error);
+                setStatus(error.message || 'Generated check failed to start.', 'error');
+                log(error.message || 'Generated check failed to start.', 'error');
+            });
+        });
         elements.pauseBtn.addEventListener('click', togglePause);
         elements.stopBtn.addEventListener('click', stopProcessing);
         elements.resetBtn.addEventListener('click', () => {
@@ -1962,7 +2110,14 @@ AbCdEf1234567890"></textarea>
         inspectCsvColumnsFromText(elements.inputLinks.value || '').catch(console.error);
         resetProcessingState({ keepInput: true, clearLog: true, clearFile: false });
         updateEngineHint();
-        log('Owned Gift Link File Checker loaded. Ready for accelerated local-only file processing.', 'info');
+        log('Generated Gift Link Format Self-Checker loaded. Generating local self-check fixture automatically.', 'info');
+        setTimeout(() => {
+            runGeneratedSelfCheck({ automatic: true }).catch((error) => {
+                console.error(error);
+                setStatus(error.message || 'Automatic generated self-check failed to start.', 'error');
+                log(error.message || 'Automatic generated self-check failed to start.', 'error');
+            });
+        }, 0);
     </script>
 </body>
 </html>
