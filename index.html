@@ -365,8 +365,8 @@
         <section class="card hero">
             <div class="pill-row">
                 <span class="pill">Local-only format validation</span>
-                <span class="pill">Batch processing modes: 10/sec, 50/sec, 200/sec</span>
-                <span class="pill">Webhook for your provided entries only</span>
+                <span class="pill">Parallel worker pool: normal, fast, turbo</span>
+                <span class="pill">Concurrent webhook channels for your provided entries only</span>
             </div>
             <div>
                 <h1>Owned Gift Link File Checker</h1>
@@ -413,17 +413,45 @@ AbCdEf1234567890"></textarea>
                     <div>
                         <label for="modeSelect">Processing mode</label>
                         <select id="modeSelect">
-                            <option value="normal">Normal — 10 entries/sec</option>
-                            <option value="fast">Fast — 50 entries/sec</option>
-                            <option value="turbo">Turbo — 200 entries/sec</option>
+                            <option value="normal">Normal — 10+ entries/sec profile</option>
+                            <option value="fast">Fast — 50+ entries/sec profile</option>
+                            <option value="turbo">Turbo — 200+ entries/sec profile</option>
                         </select>
-                        <span class="hint">Speed only affects how fast your uploaded or pasted list is processed locally.</span>
+                        <span class="hint">These profiles tune local chunk sizes, worker defaults, and webhook channels for your uploaded or pasted list.</span>
                     </div>
+
+                    <div class="grid two" style="gap: 12px;">
+                        <div>
+                            <label for="workerCountInput">Parallel worker threads</label>
+                            <input id="workerCountInput" type="number" min="1" max="16" value="4" />
+                            <span class="hint">Local-only parallel parsing and normalization workers. No proxies or external scanning are used.</span>
+                        </div>
+                        <div>
+                            <label for="webhookConcurrencyInput">Webhook channels</label>
+                            <input id="webhookConcurrencyInput" type="number" min="1" max="8" value="2" />
+                            <span class="hint">Number of concurrent webhook POST requests when webhook delivery is enabled.</span>
+                        </div>
+                        <div>
+                            <label for="webhookBatchSizeInput">Webhook batch size</label>
+                            <input id="webhookBatchSizeInput" type="number" min="1" max="100" value="25" />
+                            <span class="hint">How many normalized entries to include per webhook payload.</span>
+                        </div>
+                        <div>
+                            <label for="logModeSelect">Log detail</label>
+                            <select id="logModeSelect">
+                                <option value="summary">Summary only — fastest</option>
+                                <option value="verbose">Verbose</option>
+                            </select>
+                            <span class="hint">Summary mode reduces browser DOM work for better large-file performance.</span>
+                        </div>
+                    </div>
+
+                    <div id="engineHint" class="hint">Parallel engine settings will be shown here.</div>
 
                     <div>
                         <label for="webhookInput">Optional webhook URL</label>
                         <input id="webhookInput" type="url" placeholder="https://example.com/webhook" />
-                        <span class="hint">If enabled, the app sends batches of locally validated entries that came from your own list.</span>
+                        <span class="hint">If enabled, the app sends batches of locally validated entries that came from your own file or list.</span>
                     </div>
 
                     <label class="checkbox-row">
@@ -539,16 +567,37 @@ AbCdEf1234567890"></textarea>
     </main>
 
     <script>
-        const MODE_CONFIG = {
-            normal: { label: 'Normal', rate: 10, batchSize: 1 },
-            fast: { label: 'Fast', rate: 50, batchSize: 5 },
-            turbo: { label: 'Turbo', rate: 200, batchSize: 20 }
-        };
-
+        const HARDWARE_THREADS = Math.max(1, Math.min(16, navigator.hardwareConcurrency || 4));
         const VALID_CODE_REGEX = /^[A-Za-z0-9_-]{16,64}$/;
-        const MAX_LOG_LINES = 300;
-        const WEBHOOK_BATCH_SIZE = 10;
-        const TICK_MS = 100;
+        const MAX_LOG_LINES = 220;
+        const UI_SYNC_INTERVAL_MS = 180;
+
+        const MODE_CONFIG = {
+            normal: {
+                label: 'Normal',
+                targetRate: 10,
+                defaultWorkers: 1,
+                chunkSize: 250,
+                webhookConcurrency: 1,
+                webhookBatchSize: 10
+            },
+            fast: {
+                label: 'Fast',
+                targetRate: 50,
+                defaultWorkers: Math.min(2, HARDWARE_THREADS),
+                chunkSize: 500,
+                webhookConcurrency: 2,
+                webhookBatchSize: 25
+            },
+            turbo: {
+                label: 'Turbo',
+                targetRate: 200,
+                defaultWorkers: Math.min(8, Math.max(2, HARDWARE_THREADS)),
+                chunkSize: 1000,
+                webhookConcurrency: 4,
+                webhookBatchSize: 50
+            }
+        };
 
         const elements = {
             inputLinks: document.getElementById('inputLinks'),
@@ -558,6 +607,11 @@ AbCdEf1234567890"></textarea>
             sampleBtn: document.getElementById('sampleBtn'),
             clearBtn: document.getElementById('clearBtn'),
             modeSelect: document.getElementById('modeSelect'),
+            workerCountInput: document.getElementById('workerCountInput'),
+            webhookConcurrencyInput: document.getElementById('webhookConcurrencyInput'),
+            webhookBatchSizeInput: document.getElementById('webhookBatchSizeInput'),
+            logModeSelect: document.getElementById('logModeSelect'),
+            engineHint: document.getElementById('engineHint'),
             webhookInput: document.getElementById('webhookInput'),
             webhookEnabled: document.getElementById('webhookEnabled'),
             startBtn: document.getElementById('startBtn'),
@@ -589,8 +643,16 @@ AbCdEf1234567890"></textarea>
             processed: 0,
             webhookDeliveries: 0,
             webhookFailures: 0,
-            modeKey: 'normal'
+            modeKey: 'normal',
+            activeWorkers: 0,
+            lastStatsSync: 0
         };
+
+        function clampInt(value, min, max, fallback) {
+            const parsed = Number.parseInt(value, 10);
+            if (Number.isNaN(parsed)) return fallback;
+            return Math.min(max, Math.max(min, parsed));
+        }
 
         function setStatus(message, kind = 'ready') {
             elements.status.textContent = message;
@@ -610,76 +672,136 @@ AbCdEf1234567890"></textarea>
             elements.log.scrollTop = elements.log.scrollHeight;
         }
 
-        function updateStats() {
+        function updateEngineHint() {
+            const mode = MODE_CONFIG[elements.modeSelect.value] || MODE_CONFIG.normal;
+            const workers = clampInt(elements.workerCountInput.value, 1, 16, mode.defaultWorkers);
+            const webhookChannels = clampInt(elements.webhookConcurrencyInput.value, 1, 8, mode.webhookConcurrency);
+            const batchSize = clampInt(elements.webhookBatchSizeInput.value, 1, 100, mode.webhookBatchSize);
+
+            elements.engineHint.textContent = `Detected browser threads: ${HARDWARE_THREADS}. Profile: ${mode.label} (~${mode.targetRate}+ rows/sec target). Active workers: ${state.activeWorkers || workers}. Chunk size: ${mode.chunkSize}. Webhook channels: ${webhookChannels}. Webhook batch size: ${batchSize}.`;
+        }
+
+        function updateStats({ syncText = false } = {}) {
             const total = state.queue.length;
-            elements.totalCount.textContent = total;
-            elements.processedCount.textContent = state.processed;
-            elements.validCount.textContent = state.valid.length;
-            elements.duplicateCount.textContent = state.duplicates.length;
-            elements.invalidCount.textContent = state.invalid.length;
-            elements.webhookCount.textContent = `${state.webhookDeliveries}${state.webhookFailures ? ` / ${state.webhookFailures} failed` : ''}`;
+            elements.totalCount.textContent = total.toLocaleString();
+            elements.processedCount.textContent = state.processed.toLocaleString();
+            elements.validCount.textContent = state.valid.length.toLocaleString();
+            elements.duplicateCount.textContent = state.duplicates.length.toLocaleString();
+            elements.invalidCount.textContent = state.invalid.length.toLocaleString();
+            elements.webhookCount.textContent = `${state.webhookDeliveries.toLocaleString()}${state.webhookFailures ? ` / ${state.webhookFailures.toLocaleString()} failed` : ''}`;
 
             elements.progressBar.max = total || 1;
             elements.progressBar.value = Math.min(state.processed, total || 1);
-            elements.progressLabel.textContent = `${state.processed} / ${total} processed`;
+            elements.progressLabel.textContent = `${state.processed.toLocaleString()} / ${total.toLocaleString()} processed`;
 
-            elements.validOutput.value = state.valid.join('\n');
-            elements.duplicateOutput.value = state.duplicates.join('\n');
-            elements.invalidOutput.value = state.invalid.join('\n');
+            if (syncText) {
+                elements.validOutput.value = state.valid.join('\n');
+                elements.duplicateOutput.value = state.duplicates.join('\n');
+                elements.invalidOutput.value = state.invalid.join('\n');
+            }
         }
 
-        function normalizeGiftEntry(rawInput) {
-            const raw = rawInput.trim();
-            if (!raw) {
-                return { kind: 'empty' };
-            }
+        function buildWorkerUrl() {
+            const workerSource = String.raw`
+                const VALID_CODE_REGEX = /^[A-Za-z0-9_-]{16,64}$/;
 
-            const compact = raw.replace(/\s+/g, '');
-            if (VALID_CODE_REGEX.test(compact)) {
-                return {
-                    kind: 'valid',
-                    code: compact,
-                    normalized: `https://discord.gift/${compact}`
+                function normalizeGiftEntry(rawInput) {
+                    const raw = String(rawInput || '').trim();
+                    if (!raw) return { kind: 'empty' };
+
+                    const compact = raw.replace(/\s+/g, '');
+                    if (VALID_CODE_REGEX.test(compact)) {
+                        return { kind: 'valid', normalized: 'https://discord.gift/' + compact };
+                    }
+
+                    const normalizedUrlInput = /^(discord\.gift|www\.discord\.gift|discord\.com|www\.discord\.com|discordapp\.com|www\.discordapp\.com)\//i.test(compact)
+                        ? 'https://' + compact
+                        : compact;
+
+                    let parsed;
+                    try {
+                        parsed = new URL(normalizedUrlInput);
+                    } catch {
+                        return { kind: 'invalid', reason: 'Not a supported link or code', raw };
+                    }
+
+                    const host = parsed.hostname.toLowerCase();
+                    let pathname = parsed.pathname;
+                    while (pathname.endsWith('/')) {
+                        pathname = pathname.slice(0, -1);
+                    }
+                    const segments = pathname.split('/').filter(Boolean);
+                    const supportedHosts = new Set(['discord.gift', 'www.discord.gift', 'discord.com', 'www.discord.com', 'discordapp.com', 'www.discordapp.com']);
+
+                    if (!supportedHosts.has(host)) {
+                        return { kind: 'invalid', reason: 'Unsupported host', raw };
+                    }
+
+                    let code = null;
+                    if (host.includes('discord.gift') && segments.length === 1) {
+                        code = segments[0];
+                    } else if ((host.includes('discord.com') || host.includes('discordapp.com')) && segments.length === 2 && segments[0].toLowerCase() === 'gifts') {
+                        code = segments[1];
+                    }
+
+                    if (!code || !VALID_CODE_REGEX.test(code)) {
+                        return { kind: 'invalid', reason: 'Unsupported path or code shape', raw };
+                    }
+
+                    return { kind: 'valid', normalized: 'https://discord.gift/' + code };
+                }
+
+                self.onmessage = (event) => {
+                    const rows = Array.isArray(event.data && event.data.rows) ? event.data.rows : [];
+                    const valid = [];
+                    const invalid = [];
+
+                    for (const raw of rows) {
+                        const result = normalizeGiftEntry(raw);
+                        if (result.kind === 'valid') {
+                            valid.push(result.normalized);
+                        } else if (result.kind === 'invalid') {
+                            invalid.push(raw + '  ← ' + result.reason);
+                        }
+                    }
+
+                    self.postMessage({
+                        valid,
+                        invalid,
+                        processed: rows.length,
+                        chunkIndex: (event.data && event.data.chunkIndex) || 0
+                    });
                 };
+            `;
+
+            return URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }));
+        }
+
+        function splitIntoChunks(items, chunkSize) {
+            const chunks = [];
+            for (let i = 0; i < items.length; i += chunkSize) {
+                chunks.push(items.slice(i, i + chunkSize));
+            }
+            return chunks;
+        }
+
+        function mergeWorkerResult(data) {
+            if (Array.isArray(data.valid)) {
+                for (const normalized of data.valid) {
+                    if (state.seen.has(normalized)) {
+                        state.duplicates.push(normalized);
+                    } else {
+                        state.seen.add(normalized);
+                        state.valid.push(normalized);
+                    }
+                }
             }
 
-            const normalizedUrlInput = /^(discord\.gift|www\.discord\.gift|discord\.com|www\.discord\.com|discordapp\.com|www\.discordapp\.com)\//i.test(compact)
-                ? `https://${compact}`
-                : compact;
-
-            let parsed;
-            try {
-                parsed = new URL(normalizedUrlInput);
-            } catch {
-                return { kind: 'invalid', reason: 'Not a supported link or code', raw };
+            if (Array.isArray(data.invalid) && data.invalid.length) {
+                state.invalid.push(...data.invalid);
             }
 
-            const host = parsed.hostname.toLowerCase();
-            const pathname = parsed.pathname.replace(/\/+$/, '');
-            const segments = pathname.split('/').filter(Boolean);
-
-            const supportedHosts = new Set(['discord.gift', 'www.discord.gift', 'discord.com', 'www.discord.com', 'discordapp.com', 'www.discordapp.com']);
-            if (!supportedHosts.has(host)) {
-                return { kind: 'invalid', reason: 'Unsupported host', raw };
-            }
-
-            let code = null;
-
-            if ((host.includes('discord.gift')) && segments.length === 1) {
-                code = segments[0];
-            } else if ((host.includes('discord.com') || host.includes('discordapp.com')) && segments.length === 2 && segments[0].toLowerCase() === 'gifts') {
-                code = segments[1];
-            }
-
-            if (!code || !VALID_CODE_REGEX.test(code)) {
-                return { kind: 'invalid', reason: 'Unsupported path or code shape', raw };
-            }
-
-            return {
-                kind: 'valid',
-                code,
-                normalized: `https://discord.gift/${code}`
-            };
+            state.processed += Number(data.processed || 0);
         }
 
         function resetResults({ clearInput = false, clearLog = false } = {}) {
@@ -693,6 +815,8 @@ AbCdEf1234567890"></textarea>
             state.processed = 0;
             state.webhookDeliveries = 0;
             state.webhookFailures = 0;
+            state.activeWorkers = 0;
+            state.lastStatsSync = 0;
 
             if (clearInput) {
                 elements.inputLinks.value = '';
@@ -706,66 +830,95 @@ AbCdEf1234567890"></textarea>
 
             elements.startBtn.disabled = false;
             elements.stopBtn.disabled = true;
-            updateStats();
+            updateEngineHint();
+            updateStats({ syncText: true });
             setStatus('Ready. Upload a file or paste owned links/codes, then click “Start processing”.', 'ready');
         }
 
         function parseInputRows() {
             return elements.inputLinks.value
                 .split(/\r?\n|,/)
-                .map(line => line.trim())
+                .map((line) => line.trim())
                 .filter(Boolean);
         }
 
-        async function sleep(ms) {
-            return new Promise(resolve => setTimeout(resolve, ms));
-        }
-
-        async function processQueue() {
-            const mode = MODE_CONFIG[state.modeKey];
+        async function processQueueParallel() {
+            const mode = MODE_CONFIG[state.modeKey] || MODE_CONFIG.normal;
             const rows = state.queue;
-            let cursor = 0;
+            const chunks = splitIntoChunks(rows, mode.chunkSize);
+            const requestedWorkers = clampInt(elements.workerCountInput.value, 1, 16, mode.defaultWorkers);
+            const workerCount = Math.max(1, Math.min(requestedWorkers, chunks.length || 1));
+            const verbose = elements.logModeSelect.value === 'verbose';
+            const summaryStep = Math.max(1, Math.ceil((chunks.length || 1) / 10));
 
-            setStatus(`Processing ${rows.length} supplied entries at ${mode.rate}/sec (${mode.label.toLowerCase()} mode).`, 'running');
-            log(`Started ${mode.label.toLowerCase()} processing for ${rows.length} supplied entries.`, 'info');
+            state.activeWorkers = workerCount;
+            updateEngineHint();
+            updateStats();
+            setStatus(`Processing ${rows.length.toLocaleString()} supplied entries with ${workerCount} parallel worker(s) in ${mode.label.toLowerCase()} profile.`, 'running');
+            log(`Started local processing for ${rows.length.toLocaleString()} row(s) using ${workerCount} worker(s) across ${chunks.length.toLocaleString()} chunk(s).`, 'info');
 
-            while (cursor < rows.length && !state.shouldStop) {
-                const slice = rows.slice(cursor, cursor + mode.batchSize);
+            const workerUrl = buildWorkerUrl();
+            let nextChunkIndex = 0;
+            let completedChunks = 0;
+            let lastBucketLogged = -1;
 
-                for (const raw of slice) {
-                    const result = normalizeGiftEntry(raw);
+            const maybeSyncUi = (force = false) => {
+                const now = performance.now();
+                if (force || (now - state.lastStatsSync) >= UI_SYNC_INTERVAL_MS) {
+                    updateStats();
+                    state.lastStatsSync = now;
+                }
+            };
 
-                    if (result.kind === 'valid') {
-                        if (state.seen.has(result.normalized)) {
-                            state.duplicates.push(result.normalized);
-                            log(`Duplicate skipped: ${result.normalized}`, 'warning');
-                        } else {
-                            state.seen.add(result.normalized);
-                            state.valid.push(result.normalized);
-                            log(`Format-valid: ${result.normalized}`, 'success');
+            const runWorker = async (slot) => {
+                const worker = new Worker(workerUrl);
+
+                try {
+                    while (!state.shouldStop) {
+                        const chunkIndex = nextChunkIndex;
+                        if (chunkIndex >= chunks.length) break;
+                        nextChunkIndex += 1;
+
+                        const data = await new Promise((resolve, reject) => {
+                            worker.onmessage = (event) => resolve(event.data || {});
+                            worker.onerror = (event) => reject(new Error(event.message || `Worker ${slot + 1} failed.`));
+                            worker.postMessage({ rows: chunks[chunkIndex], chunkIndex });
+                        });
+
+                        mergeWorkerResult(data);
+                        completedChunks += 1;
+                        maybeSyncUi();
+
+                        if (verbose) {
+                            log(`Worker ${slot + 1} finished chunk ${chunkIndex + 1}/${chunks.length}.`, 'info');
+                        } else if (completedChunks === chunks.length || completedChunks % summaryStep === 0) {
+                            const bucket = Math.floor((completedChunks / Math.max(1, chunks.length)) * 10);
+                            if (bucket !== lastBucketLogged) {
+                                lastBucketLogged = bucket;
+                                log(`Progress: ${state.processed.toLocaleString()}/${rows.length.toLocaleString()} row(s) processed.`, 'info');
+                            }
                         }
-                    } else if (result.kind === 'invalid') {
-                        state.invalid.push(`${raw}  ← ${result.reason}`);
-                        log(`Malformed/unsupported: ${raw}`, 'error');
                     }
-
-                    state.processed += 1;
+                } finally {
+                    worker.terminate();
                 }
+            };
 
-                cursor += slice.length;
-                updateStats();
-
-                if (cursor < rows.length && !state.shouldStop) {
-                    await sleep(TICK_MS);
-                }
+            try {
+                await Promise.all(Array.from({ length: workerCount }, (_, index) => runWorker(index)));
+            } finally {
+                URL.revokeObjectURL(workerUrl);
+                state.activeWorkers = 0;
+                updateEngineHint();
+                updateStats({ syncText: true });
             }
 
             if (state.shouldStop) {
-                setStatus(`Stopped after processing ${state.processed} of ${rows.length} supplied entries.`, 'error');
+                setStatus(`Stopped after processing ${state.processed.toLocaleString()} of ${rows.length.toLocaleString()} supplied entries.`, 'error');
                 log('Processing stopped by user.', 'warning');
             } else {
-                setStatus(`Completed local processing of ${rows.length} supplied entries.`, 'done');
-                log('Local processing complete.', 'success');
+                setStatus(`Completed local processing of ${rows.length.toLocaleString()} supplied entries.`, 'done');
+                log(`Local processing complete. Valid: ${state.valid.length.toLocaleString()}, duplicates: ${state.duplicates.length.toLocaleString()}, malformed: ${state.invalid.length.toLocaleString()}.`, 'success');
             }
         }
 
@@ -795,44 +948,80 @@ AbCdEf1234567890"></textarea>
                 return;
             }
 
-            const totalBatches = Math.ceil(state.valid.length / WEBHOOK_BATCH_SIZE);
-            log(`Sending ${state.valid.length} validated entries to webhook in ${totalBatches} batch(es).`, 'info');
+            const mode = MODE_CONFIG[state.modeKey] || MODE_CONFIG.normal;
+            const batchSize = clampInt(elements.webhookBatchSizeInput.value, 1, 100, mode.webhookBatchSize);
+            const channelCount = clampInt(elements.webhookConcurrencyInput.value, 1, 8, mode.webhookConcurrency);
+            const batches = splitIntoChunks(state.valid, batchSize);
+            const activeChannels = Math.max(1, Math.min(channelCount, batches.length));
+            const verbose = elements.logModeSelect.value === 'verbose';
+            let nextBatchIndex = 0;
 
-            for (let i = 0; i < state.valid.length; i += WEBHOOK_BATCH_SIZE) {
-                const batch = state.valid.slice(i, i + WEBHOOK_BATCH_SIZE);
-                const batchIndex = (i / WEBHOOK_BATCH_SIZE) + 1;
-                const payload = {
-                    event: 'owned_gift_link_batch',
-                    generatedAt: new Date().toISOString(),
-                    batchIndex,
-                    totalBatches,
-                    count: batch.length,
-                    entries: batch,
-                    summary: {
-                        totalInputRows: state.queue.length,
-                        processed: state.processed,
-                        validUnique: state.valid.length,
-                        duplicates: state.duplicates.length,
-                        malformed: state.invalid.length,
-                        mode: state.modeKey
+            log(`Sending ${state.valid.length.toLocaleString()} format-valid entries in ${batches.length.toLocaleString()} batch(es) using ${activeChannels} concurrent webhook channel(s).`, 'info');
+
+            const sendNextBatch = async (slot) => {
+                while (!state.shouldStop) {
+                    const batchIndex = nextBatchIndex;
+                    if (batchIndex >= batches.length) return;
+                    nextBatchIndex += 1;
+
+                    const batch = batches[batchIndex];
+                    const payload = {
+                        event: 'owned_gift_link_batch',
+                        generatedAt: new Date().toISOString(),
+                        batchIndex: batchIndex + 1,
+                        totalBatches: batches.length,
+                        count: batch.length,
+                        entries: batch,
+                        summary: {
+                            totalInputRows: state.queue.length,
+                            processed: state.processed,
+                            validUnique: state.valid.length,
+                            duplicates: state.duplicates.length,
+                            malformed: state.invalid.length,
+                            mode: state.modeKey,
+                            workersUsed: clampInt(elements.workerCountInput.value, 1, 16, mode.defaultWorkers),
+                            webhookChannels: activeChannels
+                        }
+                    };
+
+                    try {
+                        const response = await fetch(parsedUrl.toString(), {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}`);
+                        }
+
+                        state.webhookDeliveries += 1;
+                        if (verbose || batches.length <= 5) {
+                            log(`Webhook channel ${slot + 1} sent batch ${batchIndex + 1}/${batches.length}.`, 'success');
+                        }
+                    } catch (error) {
+                        state.webhookFailures += 1;
+                        log(`Webhook batch ${batchIndex + 1}/${batches.length} failed: ${error.message}`, 'error');
+                    } finally {
+                        updateStats();
                     }
-                };
-
-                const response = await fetch(parsedUrl.toString(), {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
-
-                if (!response.ok) {
-                    state.webhookFailures += 1;
-                    updateStats();
-                    throw new Error(`Webhook request failed on batch ${batchIndex} with HTTP ${response.status}.`);
                 }
+            };
 
-                state.webhookDeliveries += 1;
-                updateStats();
-                log(`Webhook batch ${batchIndex}/${totalBatches} sent successfully.`, 'success');
+            await Promise.all(Array.from({ length: activeChannels }, (_, index) => sendNextBatch(index)));
+            updateStats({ syncText: true });
+
+            if (state.shouldStop) {
+                log('Webhook delivery halted because processing was stopped.', 'warning');
+                return;
+            }
+
+            if (state.webhookFailures) {
+                setStatus(`Local processing complete. Webhook delivered ${state.webhookDeliveries}/${batches.length} batch(es).`, 'error');
+                log(`Webhook delivery finished with ${state.webhookFailures.toLocaleString()} failed batch(es).`, 'warning');
+            } else {
+                setStatus('Completed local processing and webhook delivery for your supplied entries.', 'done');
+                log('Webhook delivery complete.', 'success');
             }
         }
 
@@ -849,20 +1038,18 @@ AbCdEf1234567890"></textarea>
             state.modeKey = elements.modeSelect.value;
             state.isRunning = true;
             state.shouldStop = false;
+            state.lastStatsSync = performance.now();
 
             elements.startBtn.disabled = true;
             elements.stopBtn.disabled = false;
+            updateEngineHint();
             updateStats();
 
             try {
-                await processQueue();
+                await processQueueParallel();
 
                 if (!state.shouldStop) {
                     await sendWebhookBatches();
-                }
-
-                if (!state.shouldStop && elements.webhookEnabled.checked) {
-                    setStatus('Completed local processing and webhook delivery for your supplied entries.', 'done');
                 }
             } catch (error) {
                 console.error(error);
@@ -872,7 +1059,8 @@ AbCdEf1234567890"></textarea>
                 state.isRunning = false;
                 elements.startBtn.disabled = false;
                 elements.stopBtn.disabled = true;
-                updateStats();
+                updateEngineHint();
+                updateStats({ syncText: true });
             }
         }
 
@@ -882,6 +1070,8 @@ AbCdEf1234567890"></textarea>
             }
             state.shouldStop = true;
             elements.stopBtn.disabled = true;
+            setStatus('Stopping after active chunks finish...', 'error');
+            log('Stop requested. Waiting for in-flight worker chunks to finish.', 'warning');
         }
 
         function downloadText(kind) {
@@ -932,10 +1122,19 @@ AbCdEf1234567890"></textarea>
             if (!file) return;
 
             const text = await file.text();
+            const roughRows = text.split(/\r?\n|,/).filter(Boolean).length;
             elements.inputLinks.value = text;
-            elements.fileMeta.textContent = `Loaded file: ${file.name} (${file.size.toLocaleString()} bytes)`;
+            elements.fileMeta.textContent = `Loaded file: ${file.name} (${file.size.toLocaleString()} bytes, about ${roughRows.toLocaleString()} rows)`;
             log(`Loaded ${file.name} into the input area.`, 'info');
             setStatus(`Loaded ${file.name}. Review the entries, then click “Start processing”.`, 'ready');
+        }
+
+        function applyModeDefaults() {
+            const mode = MODE_CONFIG[elements.modeSelect.value] || MODE_CONFIG.normal;
+            elements.workerCountInput.value = mode.defaultWorkers;
+            elements.webhookConcurrencyInput.value = mode.webhookConcurrency;
+            elements.webhookBatchSizeInput.value = mode.webhookBatchSize;
+            updateEngineHint();
         }
 
         elements.fileInput.addEventListener('change', async (event) => {
@@ -943,14 +1142,14 @@ AbCdEf1234567890"></textarea>
             await loadSelectedFile(file);
         });
 
-        ['dragenter', 'dragover'].forEach(eventName => {
+        ['dragenter', 'dragover'].forEach((eventName) => {
             elements.uploadBox.addEventListener(eventName, (event) => {
                 event.preventDefault();
                 elements.uploadBox.classList.add('dragover');
             });
         });
 
-        ['dragleave', 'dragend', 'drop'].forEach(eventName => {
+        ['dragleave', 'dragend', 'drop'].forEach((eventName) => {
             elements.uploadBox.addEventListener(eventName, (event) => {
                 event.preventDefault();
                 elements.uploadBox.classList.remove('dragover');
@@ -984,6 +1183,11 @@ AbCdEf1234567890"></textarea>
             setStatus('Ready. Upload a file or paste owned links/codes, then click “Start processing”.', 'ready');
         });
 
+        elements.modeSelect.addEventListener('change', applyModeDefaults);
+        elements.workerCountInput.addEventListener('input', updateEngineHint);
+        elements.webhookConcurrencyInput.addEventListener('input', updateEngineHint);
+        elements.webhookBatchSizeInput.addEventListener('input', updateEngineHint);
+
         elements.startBtn.addEventListener('click', startProcessing);
         elements.stopBtn.addEventListener('click', stopProcessing);
         elements.resetBtn.addEventListener('click', () => {
@@ -991,13 +1195,13 @@ AbCdEf1234567890"></textarea>
             log('Results reset.', 'info');
         });
 
-        document.querySelectorAll('[data-download]').forEach(button => {
+        document.querySelectorAll('[data-download]').forEach((button) => {
             button.addEventListener('click', () => downloadText(button.dataset.download));
         });
 
-        document.querySelectorAll('[data-copy-target]').forEach(button => {
+        document.querySelectorAll('[data-copy-target]').forEach((button) => {
             button.addEventListener('click', () => {
-                copyOutput(button.dataset.copyTarget).catch(error => {
+                copyOutput(button.dataset.copyTarget).catch((error) => {
                     console.error(error);
                     log('Clipboard copy failed in this browser.', 'error');
                 });
@@ -1005,7 +1209,9 @@ AbCdEf1234567890"></textarea>
         });
 
         resetResults({ clearLog: true });
-        log('Owned Gift Link File Checker loaded. Ready for local-only file processing.', 'info');
+        applyModeDefaults();
+        log('Owned Gift Link File Checker loaded. Ready for accelerated local-only file processing.', 'info');
     </script>
+
 </body>
 </html>
