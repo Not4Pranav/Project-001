@@ -20,9 +20,7 @@
             --shadow: 0 18px 45px rgba(0, 0, 0, 0.28);
         }
 
-        * {
-            box-sizing: border-box;
-        }
+        * { box-sizing: border-box; }
 
         body {
             margin: 0;
@@ -36,7 +34,7 @@
         }
 
         .app {
-            width: min(1100px, 100%);
+            width: min(1220px, 100%);
             margin: 0 auto;
             display: grid;
             gap: 20px;
@@ -51,13 +49,8 @@
             backdrop-filter: blur(10px);
         }
 
-        h1, h2, h3 {
-            margin: 0 0 10px;
-        }
-
-        h1 {
-            font-size: clamp(1.8rem, 4vw, 2.7rem);
-        }
+        h1, h2, h3 { margin: 0 0 10px; }
+        h1 { font-size: clamp(1.8rem, 4vw, 2.7rem); }
 
         p {
             color: var(--muted);
@@ -101,7 +94,11 @@
         }
 
         .grid.two {
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+        }
+
+        .grid.three {
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
         }
 
         label {
@@ -115,6 +112,7 @@
             margin-top: 6px;
             color: var(--muted);
             font-size: 0.9rem;
+            line-height: 1.45;
         }
 
         .upload-box {
@@ -143,6 +141,7 @@
             margin-top: 10px;
             color: #cbd5e1;
             font-size: 0.92rem;
+            white-space: pre-wrap;
         }
 
         textarea,
@@ -167,7 +166,7 @@
         }
 
         textarea {
-            min-height: 240px;
+            min-height: 250px;
             resize: vertical;
         }
 
@@ -189,14 +188,8 @@
             transition: transform 0.12s ease, opacity 0.12s ease, background 0.12s ease;
         }
 
-        button:hover:not(:disabled) {
-            transform: translateY(-1px);
-        }
-
-        button:disabled {
-            opacity: 0.55;
-            cursor: not-allowed;
-        }
+        button:hover:not(:disabled) { transform: translateY(-1px); }
+        button:disabled { opacity: 0.55; cursor: not-allowed; }
 
         .primary-btn {
             background: linear-gradient(135deg, var(--primary) 0%, var(--primary-2) 100%);
@@ -213,6 +206,12 @@
             background: rgba(239, 68, 68, 0.15);
             color: #fecaca;
             border: 1px solid rgba(239, 68, 68, 0.35);
+        }
+
+        .success-btn {
+            background: rgba(34, 197, 94, 0.14);
+            color: #bbf7d0;
+            border: 1px solid rgba(34, 197, 94, 0.3);
         }
 
         .stats {
@@ -235,7 +234,7 @@
         }
 
         .stat .value {
-            font-size: 1.5rem;
+            font-size: 1.35rem;
             font-weight: 800;
         }
 
@@ -256,11 +255,9 @@
         .status.running { color: #c7d2fe; }
         .status.done { color: #bbf7d0; }
         .status.error { color: #fecaca; }
+        .status.paused { color: #fde68a; }
 
-        .progress-wrap {
-            display: grid;
-            gap: 8px;
-        }
+        .progress-wrap { display: grid; gap: 8px; }
 
         progress {
             width: 100%;
@@ -284,7 +281,7 @@
             display: flex;
             align-items: flex-start;
             gap: 12px;
-            margin-top: 14px;
+            margin-top: 2px;
         }
 
         .checkbox-row input[type="checkbox"] {
@@ -309,14 +306,14 @@
         }
 
         .result-panel textarea {
-            min-height: 170px;
+            min-height: 190px;
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
             font-size: 0.9rem;
         }
 
         .log {
             min-height: 220px;
-            max-height: 320px;
+            max-height: 340px;
             overflow: auto;
             padding: 14px;
             border-radius: 16px;
@@ -328,10 +325,7 @@
             white-space: pre-wrap;
         }
 
-        .log-line {
-            margin-bottom: 5px;
-        }
-
+        .log-line { margin-bottom: 5px; }
         .log-line.success { color: #86efac; }
         .log-line.error { color: #fca5a5; }
         .log-line.warning { color: #fcd34d; }
@@ -348,15 +342,16 @@
             padding: 2px 7px;
         }
 
-        @media (max-width: 640px) {
-            .card {
-                padding: 18px;
-            }
+        .inline-note {
+            color: #cbd5e1;
+            font-size: 0.92rem;
+        }
 
-            .control-row {
-                flex-direction: column;
-                align-items: stretch;
-            }
+        .hidden { display: none; }
+
+        @media (max-width: 700px) {
+            .card { padding: 18px; }
+            .control-row { flex-direction: column; align-items: stretch; }
         }
     </style>
 </head>
@@ -365,15 +360,15 @@
         <section class="card hero">
             <div class="pill-row">
                 <span class="pill">Local-only format validation</span>
-                <span class="pill">Parallel worker pool: normal, fast, turbo</span>
-                <span class="pill">Concurrent webhook channels for your provided entries only</span>
+                <span class="pill">Parallel workers + streamed file reading</span>
+                <span class="pill">Concurrent webhook delivery for your provided entries only</span>
             </div>
             <div>
                 <h1>Owned Gift Link File Checker</h1>
                 <p>
                     Upload a text, CSV, or log file containing gift links or codes you already possess, or paste them manually.
-                    This tool normalizes your input, validates supported formats locally, removes duplicates, processes rows at your chosen speed,
-                    and can optionally notify a webhook with the format-valid entries from your own file or list.
+                    This tool normalizes your input, validates supported formats locally, removes duplicates, processes rows in parallel,
+                    supports large-file streaming, and can optionally notify a webhook with the format-valid entries from your own file or list.
                 </p>
             </div>
             <div class="warning-box">
@@ -410,31 +405,37 @@ AbCdEf1234567890"></textarea>
 
             <div class="card">
                 <div class="grid" style="gap: 16px;">
-                    <div>
-                        <label for="modeSelect">Processing mode</label>
-                        <select id="modeSelect">
-                            <option value="normal">Normal — 10+ entries/sec profile</option>
-                            <option value="fast">Fast — 50+ entries/sec profile</option>
-                            <option value="turbo">Turbo — 200+ entries/sec profile</option>
-                        </select>
-                        <span class="hint">These profiles tune local chunk sizes, worker defaults, and webhook channels for your uploaded or pasted list.</span>
+                    <div class="grid two" style="gap: 12px;">
+                        <div>
+                            <label for="modeSelect">Processing profile</label>
+                            <select id="modeSelect">
+                                <option value="normal">Normal</option>
+                                <option value="fast">Fast</option>
+                                <option value="turbo">Turbo</option>
+                            </select>
+                            <span class="hint">Profiles set sensible defaults. Actual local throughput depends on your device and file shape.</span>
+                        </div>
+                        <div>
+                            <label for="inputFormatSelect">Input format</label>
+                            <select id="inputFormatSelect">
+                                <option value="auto">Auto detect</option>
+                                <option value="lines">One entry per line</option>
+                                <option value="csv">CSV / delimited rows</option>
+                            </select>
+                            <span class="hint">CSV mode supports quoted columns and column selection.</span>
+                        </div>
                     </div>
 
-                    <div class="grid two" style="gap: 12px;">
+                    <div class="grid three" style="gap: 12px;">
                         <div>
                             <label for="workerCountInput">Parallel worker threads</label>
                             <input id="workerCountInput" type="number" min="1" max="16" value="4" />
-                            <span class="hint">Local-only parallel parsing and normalization workers. No proxies or external scanning are used.</span>
+                            <span class="hint">Higher can be faster for large files, but too many workers may hurt small jobs.</span>
                         </div>
                         <div>
-                            <label for="webhookConcurrencyInput">Webhook channels</label>
-                            <input id="webhookConcurrencyInput" type="number" min="1" max="8" value="2" />
-                            <span class="hint">Number of concurrent webhook POST requests when webhook delivery is enabled.</span>
-                        </div>
-                        <div>
-                            <label for="webhookBatchSizeInput">Webhook batch size</label>
-                            <input id="webhookBatchSizeInput" type="number" min="1" max="100" value="25" />
-                            <span class="hint">How many normalized entries to include per webhook payload.</span>
+                            <label for="chunkSizeInput">Chunk size</label>
+                            <input id="chunkSizeInput" type="number" min="100" max="20000" value="1000" />
+                            <span class="hint">How many candidate rows each worker receives per batch.</span>
                         </div>
                         <div>
                             <label for="logModeSelect">Log detail</label>
@@ -442,8 +443,46 @@ AbCdEf1234567890"></textarea>
                                 <option value="summary">Summary only — fastest</option>
                                 <option value="verbose">Verbose</option>
                             </select>
-                            <span class="hint">Summary mode reduces browser DOM work for better large-file performance.</span>
+                            <span class="hint">Summary mode lowers browser DOM work for better throughput.</span>
                         </div>
+                    </div>
+
+                    <div class="grid three" style="gap: 12px;">
+                        <div>
+                            <label for="csvDelimiterSelect">CSV delimiter</label>
+                            <select id="csvDelimiterSelect">
+                                <option value="auto">Auto detect</option>
+                                <option value=",">Comma</option>
+                                <option value=";">Semicolon</option>
+                                <option value="\t">Tab</option>
+                                <option value="|">Pipe</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="csvColumnSelect">CSV column to check</label>
+                            <select id="csvColumnSelect">
+                                <option value="auto">Auto detect</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="webhookBatchSizeInput">Webhook batch size</label>
+                            <input id="webhookBatchSizeInput" type="number" min="1" max="1000" value="25" />
+                        </div>
+                    </div>
+
+                    <div class="grid three" style="gap: 12px;">
+                        <label class="checkbox-row">
+                            <input id="csvHeaderCheckbox" type="checkbox" checked />
+                            <span>CSV first row is a header</span>
+                        </label>
+                        <label class="checkbox-row">
+                            <input id="streamFileCheckbox" type="checkbox" checked />
+                            <span>Stream uploaded file directly for large-file processing</span>
+                        </label>
+                        <label class="checkbox-row">
+                            <input id="rememberSettingsCheckbox" type="checkbox" checked />
+                            <span>Remember settings and manual text draft in this browser</span>
+                        </label>
                     </div>
 
                     <div id="engineHint" class="hint">Parallel engine settings will be shown here.</div>
@@ -454,16 +493,29 @@ AbCdEf1234567890"></textarea>
                         <span class="hint">If enabled, the app sends batches of locally validated entries that came from your own file or list.</span>
                     </div>
 
-                    <label class="checkbox-row">
-                        <input id="webhookEnabled" type="checkbox" />
-                        <span>
-                            Enable webhook notification for format-valid owned entries.
-                            No entries are created, discovered, or fetched externally.
-                        </span>
-                    </label>
+                    <div class="grid two" style="gap: 12px;">
+                        <label class="checkbox-row">
+                            <input id="webhookEnabled" type="checkbox" />
+                            <span>
+                                Enable webhook notification for format-valid owned entries only.
+                            </span>
+                        </label>
+                        <div>
+                            <label for="webhookConcurrencyInput">Webhook channels</label>
+                            <input id="webhookConcurrencyInput" type="number" min="1" max="16" value="2" />
+                            <span class="hint">Concurrent POST requests when webhook delivery is enabled.</span>
+                        </div>
+                    </div>
+
+                    <div class="control-row">
+                        <button id="applyProfileBtn" class="ghost-btn" type="button">Apply profile defaults</button>
+                        <button id="saveSettingsBtn" class="ghost-btn" type="button">Save settings</button>
+                        <button id="clearSavedBtn" class="ghost-btn" type="button">Clear saved settings</button>
+                    </div>
 
                     <div class="control-row">
                         <button id="startBtn" class="primary-btn" type="button">Start processing</button>
+                        <button id="pauseBtn" class="ghost-btn" type="button" disabled>Pause</button>
                         <button id="stopBtn" class="danger-btn" type="button" disabled>Stop</button>
                         <button id="resetBtn" class="ghost-btn" type="button">Reset results</button>
                     </div>
@@ -496,6 +548,14 @@ AbCdEf1234567890"></textarea>
                 <div class="stat">
                     <div class="label">Webhook deliveries</div>
                     <div class="value muted-text" id="webhookCount">0</div>
+                </div>
+                <div class="stat">
+                    <div class="label">Average rows/min</div>
+                    <div class="value muted-text" id="rateCount">0</div>
+                </div>
+                <div class="stat">
+                    <div class="label">Elapsed</div>
+                    <div class="value muted-text" id="elapsedCount">0s</div>
                 </div>
             </div>
 
@@ -559,7 +619,7 @@ AbCdEf1234567890"></textarea>
             <details>
                 <summary>What this tool does and does not do</summary>
                 <div class="grid" style="gap: 10px; margin-top: 12px;">
-                    <p><strong>Does:</strong> normalize uploaded or pasted entries, validate format, deduplicate, process in high-speed local batches, export results, and optionally post your provided entries to a webhook.</p>
+                    <p><strong>Does:</strong> normalize uploaded or pasted entries, validate format, deduplicate, process in parallel local batches, stream large files, export results, and optionally post your provided entries to a webhook.</p>
                     <p><strong>Does not:</strong> generate random codes, probe external services, verify redemption status, attempt claims, or discover links you did not already supply.</p>
                 </div>
             </details>
@@ -567,35 +627,37 @@ AbCdEf1234567890"></textarea>
     </main>
 
     <script>
-        const HARDWARE_THREADS = Math.max(1, Math.min(16, navigator.hardwareConcurrency || 4));
+        const STORAGE_KEY = 'owned-gift-link-file-checker-v3';
+        const MAX_LOG_LINES = 250;
+        const UI_SYNC_INTERVAL_MS = 160;
+        const SAVE_DRAFT_LIMIT = 100000;
         const VALID_CODE_REGEX = /^[A-Za-z0-9_-]{16,64}$/;
-        const MAX_LOG_LINES = 220;
-        const UI_SYNC_INTERVAL_MS = 180;
+        const HARDWARE_THREADS = Math.max(1, Math.min(16, navigator.hardwareConcurrency || 4));
 
         const MODE_CONFIG = {
             normal: {
                 label: 'Normal',
-                targetRate: 10,
                 defaultWorkers: 1,
-                chunkSize: 250,
-                webhookConcurrency: 1,
-                webhookBatchSize: 10
+                defaultChunkSize: 500,
+                defaultWebhookConcurrency: 1,
+                defaultWebhookBatchSize: 10,
+                note: 'Good for small files or low-power devices.'
             },
             fast: {
                 label: 'Fast',
-                targetRate: 50,
                 defaultWorkers: Math.min(2, HARDWARE_THREADS),
-                chunkSize: 500,
-                webhookConcurrency: 2,
-                webhookBatchSize: 25
+                defaultChunkSize: 2000,
+                defaultWebhookConcurrency: 2,
+                defaultWebhookBatchSize: 25,
+                note: 'Balanced profile for everyday desktop use.'
             },
             turbo: {
                 label: 'Turbo',
-                targetRate: 200,
                 defaultWorkers: Math.min(8, Math.max(2, HARDWARE_THREADS)),
-                chunkSize: 1000,
-                webhookConcurrency: 4,
-                webhookBatchSize: 50
+                defaultChunkSize: 6000,
+                defaultWebhookConcurrency: 4,
+                defaultWebhookBatchSize: 50,
+                note: 'Aggressive local profile for big files and stronger CPUs.'
             }
         };
 
@@ -607,14 +669,25 @@ AbCdEf1234567890"></textarea>
             sampleBtn: document.getElementById('sampleBtn'),
             clearBtn: document.getElementById('clearBtn'),
             modeSelect: document.getElementById('modeSelect'),
+            inputFormatSelect: document.getElementById('inputFormatSelect'),
             workerCountInput: document.getElementById('workerCountInput'),
+            chunkSizeInput: document.getElementById('chunkSizeInput'),
+            csvDelimiterSelect: document.getElementById('csvDelimiterSelect'),
+            csvColumnSelect: document.getElementById('csvColumnSelect'),
+            csvHeaderCheckbox: document.getElementById('csvHeaderCheckbox'),
+            streamFileCheckbox: document.getElementById('streamFileCheckbox'),
+            rememberSettingsCheckbox: document.getElementById('rememberSettingsCheckbox'),
             webhookConcurrencyInput: document.getElementById('webhookConcurrencyInput'),
             webhookBatchSizeInput: document.getElementById('webhookBatchSizeInput'),
             logModeSelect: document.getElementById('logModeSelect'),
             engineHint: document.getElementById('engineHint'),
             webhookInput: document.getElementById('webhookInput'),
             webhookEnabled: document.getElementById('webhookEnabled'),
+            applyProfileBtn: document.getElementById('applyProfileBtn'),
+            saveSettingsBtn: document.getElementById('saveSettingsBtn'),
+            clearSavedBtn: document.getElementById('clearSavedBtn'),
             startBtn: document.getElementById('startBtn'),
+            pauseBtn: document.getElementById('pauseBtn'),
             stopBtn: document.getElementById('stopBtn'),
             resetBtn: document.getElementById('resetBtn'),
             totalCount: document.getElementById('totalCount'),
@@ -623,6 +696,8 @@ AbCdEf1234567890"></textarea>
             duplicateCount: document.getElementById('duplicateCount'),
             invalidCount: document.getElementById('invalidCount'),
             webhookCount: document.getElementById('webhookCount'),
+            rateCount: document.getElementById('rateCount'),
+            elapsedCount: document.getElementById('elapsedCount'),
             status: document.getElementById('status'),
             progressBar: document.getElementById('progressBar'),
             progressLabel: document.getElementById('progressLabel'),
@@ -633,19 +708,29 @@ AbCdEf1234567890"></textarea>
         };
 
         const state = {
+            selectedFile: null,
+            detectedCsvColumns: [],
+            pendingChunks: [],
+            queueWaiters: [],
+            pauseWaiters: [],
+            sourceDone: false,
             isRunning: false,
+            isPaused: false,
             shouldStop: false,
-            queue: [],
-            seen: new Set(),
+            activeWorkers: 0,
+            totalRows: 0,
+            processed: 0,
             valid: [],
             duplicates: [],
             invalid: [],
-            processed: 0,
+            seen: new Set(),
             webhookDeliveries: 0,
             webhookFailures: 0,
-            modeKey: 'normal',
-            activeWorkers: 0,
-            lastStatsSync: 0
+            lastStatsSync: 0,
+            startedAt: 0,
+            timerId: null,
+            usingDirectFile: false,
+            approximateInputRows: 0
         };
 
         function clampInt(value, min, max, fallback) {
@@ -664,40 +749,410 @@ AbCdEf1234567890"></textarea>
             line.className = `log-line ${kind}`;
             line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
             elements.log.appendChild(line);
-
             while (elements.log.children.length > MAX_LOG_LINES) {
                 elements.log.removeChild(elements.log.firstChild);
             }
-
             elements.log.scrollTop = elements.log.scrollHeight;
         }
 
-        function updateEngineHint() {
-            const mode = MODE_CONFIG[elements.modeSelect.value] || MODE_CONFIG.normal;
-            const workers = clampInt(elements.workerCountInput.value, 1, 16, mode.defaultWorkers);
-            const webhookChannels = clampInt(elements.webhookConcurrencyInput.value, 1, 8, mode.webhookConcurrency);
-            const batchSize = clampInt(elements.webhookBatchSizeInput.value, 1, 100, mode.webhookBatchSize);
-
-            elements.engineHint.textContent = `Detected browser threads: ${HARDWARE_THREADS}. Profile: ${mode.label} (~${mode.targetRate}+ rows/sec target). Active workers: ${state.activeWorkers || workers}. Chunk size: ${mode.chunkSize}. Webhook channels: ${webhookChannels}. Webhook batch size: ${batchSize}.`;
+        function formatElapsed(ms) {
+            if (!ms || ms < 0) return '0s';
+            const totalSeconds = Math.floor(ms / 1000);
+            const minutes = Math.floor(totalSeconds / 60);
+            const seconds = totalSeconds % 60;
+            return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
         }
 
-        function updateStats({ syncText = false } = {}) {
-            const total = state.queue.length;
-            elements.totalCount.textContent = total.toLocaleString();
+        function updateStats({ syncText = false, force = false } = {}) {
+            const now = performance.now();
+            if (!force && now - state.lastStatsSync < UI_SYNC_INTERVAL_MS) return;
+            state.lastStatsSync = now;
+
+            elements.totalCount.textContent = state.totalRows.toLocaleString();
             elements.processedCount.textContent = state.processed.toLocaleString();
             elements.validCount.textContent = state.valid.length.toLocaleString();
             elements.duplicateCount.textContent = state.duplicates.length.toLocaleString();
             elements.invalidCount.textContent = state.invalid.length.toLocaleString();
             elements.webhookCount.textContent = `${state.webhookDeliveries.toLocaleString()}${state.webhookFailures ? ` / ${state.webhookFailures.toLocaleString()} failed` : ''}`;
 
-            elements.progressBar.max = total || 1;
-            elements.progressBar.value = Math.min(state.processed, total || 1);
-            elements.progressLabel.textContent = `${state.processed.toLocaleString()} / ${total.toLocaleString()} processed`;
+            const elapsedMs = state.startedAt ? (Date.now() - state.startedAt) : 0;
+            const rate = elapsedMs > 0 ? Math.round((state.processed / elapsedMs) * 60000) : 0;
+            elements.rateCount.textContent = rate.toLocaleString();
+            elements.elapsedCount.textContent = formatElapsed(elapsedMs);
+            elements.progressBar.max = Math.max(1, state.totalRows || 1);
+            elements.progressBar.value = Math.min(state.processed, Math.max(1, state.totalRows || 1));
+            elements.progressLabel.textContent = `${state.processed.toLocaleString()} / ${state.totalRows.toLocaleString()} processed`;
 
             if (syncText) {
                 elements.validOutput.value = state.valid.join('\n');
                 elements.duplicateOutput.value = state.duplicates.join('\n');
                 elements.invalidOutput.value = state.invalid.join('\n');
+            }
+        }
+
+        function startStatsTimer() {
+            stopStatsTimer();
+            state.timerId = setInterval(() => updateStats({ force: true }), 500);
+        }
+
+        function stopStatsTimer() {
+            if (state.timerId) {
+                clearInterval(state.timerId);
+                state.timerId = null;
+            }
+        }
+
+        function getCurrentProfile() {
+            return MODE_CONFIG[elements.modeSelect.value] || MODE_CONFIG.normal;
+        }
+
+        function readSettings() {
+            return {
+                mode: elements.modeSelect.value,
+                inputFormat: elements.inputFormatSelect.value,
+                workers: clampInt(elements.workerCountInput.value, 1, 16, getCurrentProfile().defaultWorkers),
+                chunkSize: clampInt(elements.chunkSizeInput.value, 100, 20000, getCurrentProfile().defaultChunkSize),
+                csvDelimiter: elements.csvDelimiterSelect.value,
+                csvColumn: elements.csvColumnSelect.value,
+                csvHeader: elements.csvHeaderCheckbox.checked,
+                streamFile: elements.streamFileCheckbox.checked,
+                rememberSettings: elements.rememberSettingsCheckbox.checked,
+                webhookEnabled: elements.webhookEnabled.checked,
+                webhookUrl: elements.webhookInput.value.trim(),
+                webhookConcurrency: clampInt(elements.webhookConcurrencyInput.value, 1, 16, getCurrentProfile().defaultWebhookConcurrency),
+                webhookBatchSize: clampInt(elements.webhookBatchSizeInput.value, 1, 1000, getCurrentProfile().defaultWebhookBatchSize),
+                logMode: elements.logModeSelect.value
+            };
+        }
+
+        function applySettings(settings = {}, { includeDraft = true } = {}) {
+            if (settings.mode) elements.modeSelect.value = settings.mode;
+            if (settings.inputFormat) elements.inputFormatSelect.value = settings.inputFormat;
+            if (settings.workers) elements.workerCountInput.value = settings.workers;
+            if (settings.chunkSize) elements.chunkSizeInput.value = settings.chunkSize;
+            if (settings.csvDelimiter) elements.csvDelimiterSelect.value = settings.csvDelimiter;
+            if (typeof settings.csvHeader === 'boolean') elements.csvHeaderCheckbox.checked = settings.csvHeader;
+            if (typeof settings.streamFile === 'boolean') elements.streamFileCheckbox.checked = settings.streamFile;
+            if (typeof settings.rememberSettings === 'boolean') elements.rememberSettingsCheckbox.checked = settings.rememberSettings;
+            if (typeof settings.webhookEnabled === 'boolean') elements.webhookEnabled.checked = settings.webhookEnabled;
+            if (typeof settings.webhookUrl === 'string') elements.webhookInput.value = settings.webhookUrl;
+            if (settings.webhookConcurrency) elements.webhookConcurrencyInput.value = settings.webhookConcurrency;
+            if (settings.webhookBatchSize) elements.webhookBatchSizeInput.value = settings.webhookBatchSize;
+            if (settings.logMode) elements.logModeSelect.value = settings.logMode;
+            if (includeDraft && typeof settings.manualDraft === 'string' && !state.selectedFile) {
+                elements.inputLinks.value = settings.manualDraft;
+            }
+        }
+
+        function saveSettingsToStorage() {
+            if (!elements.rememberSettingsCheckbox.checked) return;
+            const settings = readSettings();
+            const payload = {
+                ...settings,
+                manualDraft: state.selectedFile ? '' : elements.inputLinks.value.slice(0, SAVE_DRAFT_LIMIT)
+            };
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+        }
+
+        function loadSettingsFromStorage() {
+            const raw = localStorage.getItem(STORAGE_KEY);
+            if (!raw) return false;
+            try {
+                const parsed = JSON.parse(raw);
+                applySettings(parsed);
+                return true;
+            } catch (error) {
+                console.error(error);
+                return false;
+            }
+        }
+
+        function clearSavedSettings() {
+            localStorage.removeItem(STORAGE_KEY);
+            log('Saved browser settings cleared.', 'warning');
+        }
+
+        function applyProfileDefaults() {
+            const profile = getCurrentProfile();
+            elements.workerCountInput.value = profile.defaultWorkers;
+            elements.chunkSizeInput.value = profile.defaultChunkSize;
+            elements.webhookConcurrencyInput.value = profile.defaultWebhookConcurrency;
+            elements.webhookBatchSizeInput.value = profile.defaultWebhookBatchSize;
+            updateEngineHint();
+            saveSettingsToStorage();
+        }
+
+        function updateEngineHint() {
+            const settings = readSettings();
+            const profile = getCurrentProfile();
+            const source = state.selectedFile && settings.streamFile ? 'uploaded file stream' : 'textarea/manual input';
+            elements.engineHint.textContent = `Detected browser threads: ${HARDWARE_THREADS}. Profile: ${profile.label}. Workers: ${settings.workers}. Chunk size: ${settings.chunkSize}. Source: ${source}. Webhook channels: ${settings.webhookConcurrency}. Webhook batch size: ${settings.webhookBatchSize}. ${profile.note}`;
+        }
+
+        function resetProcessingState({ keepInput = true, clearLog = false, clearFile = false } = {}) {
+            state.pendingChunks = [];
+            state.queueWaiters = [];
+            state.pauseWaiters = [];
+            state.sourceDone = false;
+            state.isRunning = false;
+            state.isPaused = false;
+            state.shouldStop = false;
+            state.activeWorkers = 0;
+            state.totalRows = 0;
+            state.processed = 0;
+            state.valid = [];
+            state.duplicates = [];
+            state.invalid = [];
+            state.seen = new Set();
+            state.webhookDeliveries = 0;
+            state.webhookFailures = 0;
+            state.lastStatsSync = 0;
+            state.startedAt = 0;
+            state.usingDirectFile = false;
+            state.approximateInputRows = 0;
+            stopStatsTimer();
+
+            if (!keepInput) {
+                elements.inputLinks.value = '';
+            }
+            if (clearFile) {
+                state.selectedFile = null;
+                state.detectedCsvColumns = [];
+                elements.fileInput.value = '';
+                elements.fileMeta.textContent = 'No file loaded yet.';
+                populateCsvColumnOptions([]);
+            }
+            if (clearLog) {
+                elements.log.innerHTML = '';
+            }
+
+            elements.startBtn.disabled = false;
+            elements.pauseBtn.disabled = true;
+            elements.pauseBtn.textContent = 'Pause';
+            elements.stopBtn.disabled = true;
+            updateStats({ syncText: true, force: true });
+            updateEngineHint();
+            setStatus('Ready. Upload a file or paste owned links/codes, then click “Start processing”.', 'ready');
+        }
+
+        function normalizeGiftEntry(rawInput) {
+            const raw = String(rawInput || '').trim();
+            if (!raw) {
+                return { kind: 'empty' };
+            }
+
+            const compact = raw.replace(/\s+/g, '');
+            if (VALID_CODE_REGEX.test(compact)) {
+                return {
+                    kind: 'valid',
+                    normalized: `https://discord.gift/${compact}`
+                };
+            }
+
+            const normalizedUrlInput = /^(discord\.gift|www\.discord\.gift|discord\.com|www\.discord\.com|discordapp\.com|www\.discordapp\.com)\//i.test(compact)
+                ? `https://${compact}`
+                : compact;
+
+            let parsed;
+            try {
+                parsed = new URL(normalizedUrlInput);
+            } catch {
+                return { kind: 'invalid', reason: 'Not a supported link or code', raw };
+            }
+
+            const host = parsed.hostname.toLowerCase();
+            let pathname = parsed.pathname;
+            while (pathname.endsWith('/')) pathname = pathname.slice(0, -1);
+            const segments = pathname.split('/').filter(Boolean);
+            const supportedHosts = new Set(['discord.gift', 'www.discord.gift', 'discord.com', 'www.discord.com', 'discordapp.com', 'www.discordapp.com']);
+
+            if (!supportedHosts.has(host)) {
+                return { kind: 'invalid', reason: 'Unsupported host', raw };
+            }
+
+            let code = null;
+            if (host.includes('discord.gift') && segments.length === 1) {
+                code = segments[0];
+            } else if ((host.includes('discord.com') || host.includes('discordapp.com')) && segments.length === 2 && segments[0].toLowerCase() === 'gifts') {
+                code = segments[1];
+            }
+
+            if (!code || !VALID_CODE_REGEX.test(code)) {
+                return { kind: 'invalid', reason: 'Unsupported path or code shape', raw };
+            }
+
+            return {
+                kind: 'valid',
+                normalized: `https://discord.gift/${code}`
+            };
+        }
+
+        function detectDelimiter(line) {
+            const candidates = [',', ';', '\t', '|'];
+            let best = ',';
+            let bestScore = -1;
+            for (const candidate of candidates) {
+                const score = line.split(candidate).length;
+                if (score > bestScore) {
+                    best = candidate;
+                    bestScore = score;
+                }
+            }
+            return best;
+        }
+
+        function getCsvDelimiter() {
+            const selected = elements.csvDelimiterSelect.value;
+            if (selected === 'auto') {
+                const sampleText = elements.inputLinks.value || '';
+                const firstLine = sampleText.split(/\r?\n/).find(line => line.trim()) || '';
+                return detectDelimiter(firstLine || ',');
+            }
+            return selected === '\t' ? '\t' : selected;
+        }
+
+        function parseCsvLine(line, delimiter) {
+            const cells = [];
+            let current = '';
+            let inQuotes = false;
+
+            for (let i = 0; i < line.length; i++) {
+                const char = line[i];
+                const nextChar = line[i + 1];
+
+                if (char === '"') {
+                    if (inQuotes && nextChar === '"') {
+                        current += '"';
+                        i += 1;
+                    } else {
+                        inQuotes = !inQuotes;
+                    }
+                    continue;
+                }
+
+                if (!inQuotes && char === delimiter) {
+                    cells.push(current);
+                    current = '';
+                    continue;
+                }
+
+                current += char;
+            }
+
+            cells.push(current);
+            return cells.map(cell => cell.trim());
+        }
+
+        function autoDetectGiftColumnIndex(headers) {
+            if (!headers.length) return 0;
+            const normalized = headers.map((header) => String(header || '').trim().toLowerCase());
+            const keywords = ['gift', 'giftlink', 'gift_link', 'code', 'gift code', 'giftcode', 'link', 'url', 'invite'];
+            for (const keyword of keywords) {
+                const index = normalized.findIndex(value => value.includes(keyword));
+                if (index >= 0) return index;
+            }
+            return 0;
+        }
+
+        function populateCsvColumnOptions(columns) {
+            state.detectedCsvColumns = columns.slice();
+            const previous = elements.csvColumnSelect.value;
+            elements.csvColumnSelect.innerHTML = '';
+
+            const autoOption = document.createElement('option');
+            autoOption.value = 'auto';
+            autoOption.textContent = 'Auto detect';
+            elements.csvColumnSelect.appendChild(autoOption);
+
+            columns.forEach((columnLabel, index) => {
+                const option = document.createElement('option');
+                option.value = String(index);
+                option.textContent = columnLabel || `Column ${index + 1}`;
+                elements.csvColumnSelect.appendChild(option);
+            });
+
+            if ([...elements.csvColumnSelect.options].some(option => option.value === previous)) {
+                elements.csvColumnSelect.value = previous;
+            } else {
+                elements.csvColumnSelect.value = 'auto';
+            }
+        }
+
+        function isCsvMode() {
+            const mode = elements.inputFormatSelect.value;
+            if (mode === 'csv') return true;
+            if (mode === 'lines') return false;
+            return Boolean(state.selectedFile?.name?.toLowerCase().endsWith('.csv'));
+        }
+
+        async function inspectCsvColumnsFromText(text) {
+            if (!isCsvMode()) {
+                populateCsvColumnOptions([]);
+                return;
+            }
+            const lines = text.split(/\r?\n/).filter(line => line.trim());
+            if (!lines.length) {
+                populateCsvColumnOptions([]);
+                return;
+            }
+            const delimiter = getCsvDelimiter();
+            const sampleCells = parseCsvLine(lines[0], delimiter);
+            const labels = elements.csvHeaderCheckbox.checked
+                ? sampleCells.map((cell, index) => cell || `Column ${index + 1}`)
+                : sampleCells.map((_, index) => `Column ${index + 1}`);
+            populateCsvColumnOptions(labels);
+        }
+
+        async function inspectSelectedFile(file) {
+            if (!file) return;
+            state.selectedFile = file;
+            const previewLimit = 512 * 1024;
+            const previewText = await file.slice(0, previewLimit).text();
+            const isLarge = file.size > previewLimit;
+            elements.inputLinks.value = isLarge
+                ? `${previewText}\n\n[Preview only for large file. Processing can stream the full uploaded file directly.]`
+                : previewText;
+            state.approximateInputRows = previewText.split(/\r?\n/).filter(Boolean).length;
+            elements.fileMeta.textContent = `Loaded file: ${file.name}\nSize: ${file.size.toLocaleString()} bytes\nPreview rows: about ${state.approximateInputRows.toLocaleString()}${isLarge ? '+' : ''}\nMode: ${isLarge ? 'preview shown, full file can be streamed directly' : 'full content loaded'}`;
+            await inspectCsvColumnsFromText(previewText);
+            updateEngineHint();
+            saveSettingsToStorage();
+            log(`Loaded ${file.name}.`, 'info');
+            setStatus(`Loaded ${file.name}. Review settings, then click “Start processing”.`, 'ready');
+        }
+
+        function enqueueChunk(rows) {
+            if (!rows.length) return;
+            state.pendingChunks.push(rows);
+            while (state.queueWaiters.length) {
+                const resolve = state.queueWaiters.shift();
+                resolve();
+            }
+        }
+
+        function resolvePauseWaiters() {
+            while (state.pauseWaiters.length) {
+                const resolve = state.pauseWaiters.shift();
+                resolve();
+            }
+        }
+
+        async function waitIfPaused() {
+            if (!state.isPaused) return;
+            await new Promise(resolve => state.pauseWaiters.push(resolve));
+        }
+
+        async function dequeueChunk() {
+            while (true) {
+                if (state.shouldStop) return null;
+                await waitIfPaused();
+                if (state.pendingChunks.length) {
+                    return state.pendingChunks.shift();
+                }
+                if (state.sourceDone) {
+                    return null;
+                }
+                await new Promise(resolve => state.queueWaiters.push(resolve));
             }
         }
 
@@ -727,9 +1182,7 @@ AbCdEf1234567890"></textarea>
 
                     const host = parsed.hostname.toLowerCase();
                     let pathname = parsed.pathname;
-                    while (pathname.endsWith('/')) {
-                        pathname = pathname.slice(0, -1);
-                    }
+                    while (pathname.endsWith('/')) pathname = pathname.slice(0, -1);
                     const segments = pathname.split('/').filter(Boolean);
                     const supportedHosts = new Set(['discord.gift', 'www.discord.gift', 'discord.com', 'www.discord.com', 'discordapp.com', 'www.discordapp.com']);
 
@@ -765,24 +1218,10 @@ AbCdEf1234567890"></textarea>
                         }
                     }
 
-                    self.postMessage({
-                        valid,
-                        invalid,
-                        processed: rows.length,
-                        chunkIndex: (event.data && event.data.chunkIndex) || 0
-                    });
+                    self.postMessage({ valid, invalid, processed: rows.length });
                 };
             `;
-
             return URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' }));
-        }
-
-        function splitIntoChunks(items, chunkSize) {
-            const chunks = [];
-            for (let i = 0; i < items.length; i += chunkSize) {
-                chunks.push(items.slice(i, i + chunkSize));
-            }
-            return chunks;
         }
 
         function mergeWorkerResult(data) {
@@ -796,107 +1235,177 @@ AbCdEf1234567890"></textarea>
                     }
                 }
             }
-
             if (Array.isArray(data.invalid) && data.invalid.length) {
                 state.invalid.push(...data.invalid);
             }
-
             state.processed += Number(data.processed || 0);
+            updateStats();
         }
 
-        function resetResults({ clearInput = false, clearLog = false } = {}) {
-            state.isRunning = false;
-            state.shouldStop = false;
-            state.queue = [];
-            state.seen = new Set();
-            state.valid = [];
-            state.duplicates = [];
-            state.invalid = [];
-            state.processed = 0;
-            state.webhookDeliveries = 0;
-            state.webhookFailures = 0;
-            state.activeWorkers = 0;
-            state.lastStatsSync = 0;
+        function makeCsvResolver(settings) {
+            let headerConsumed = false;
+            let columnIndex = elements.csvColumnSelect.value === 'auto'
+                ? (state.detectedCsvColumns.length ? autoDetectGiftColumnIndex(state.detectedCsvColumns) : 0)
+                : clampInt(elements.csvColumnSelect.value, 0, 500, 0);
+            const delimiter = settings.csvDelimiter === 'auto'
+                ? null
+                : (settings.csvDelimiter === '\t' ? '\t' : settings.csvDelimiter);
 
-            if (clearInput) {
-                elements.inputLinks.value = '';
-                elements.fileInput.value = '';
-                elements.fileMeta.textContent = 'No file loaded yet.';
+            return function resolveRowFromLine(line) {
+                const trimmedLine = line.trim();
+                if (!trimmedLine) return null;
+                const activeDelimiter = delimiter || detectDelimiter(line);
+                const cells = parseCsvLine(line, activeDelimiter);
+
+                if (!headerConsumed && settings.csvHeader) {
+                    headerConsumed = true;
+                    if (elements.csvColumnSelect.value === 'auto') {
+                        columnIndex = autoDetectGiftColumnIndex(cells);
+                    }
+                    if (!state.detectedCsvColumns.length) {
+                        const labels = cells.map((cell, index) => cell || `Column ${index + 1}`);
+                        populateCsvColumnOptions(labels);
+                    }
+                    return { skip: true };
+                }
+
+                const value = cells[columnIndex] ?? '';
+                if (!value.trim()) {
+                    return { invalid: `${line}  ← Selected CSV column is empty` };
+                }
+                return { row: value.trim() };
+            };
+        }
+
+        function makeLineResolver() {
+            return function resolveRowFromLine(line) {
+                const trimmed = line.trim();
+                if (!trimmed) return null;
+                return { row: trimmed };
+            };
+        }
+
+        async function produceFromText(settings) {
+            const resolveRow = settings.inputFormat === 'csv' || (settings.inputFormat === 'auto' && isCsvMode())
+                ? makeCsvResolver(settings)
+                : makeLineResolver();
+
+            const lines = elements.inputLinks.value.split(/\r?\n/);
+            const batch = [];
+            for (const line of lines) {
+                if (state.shouldStop) break;
+                await waitIfPaused();
+                const resolved = resolveRow(line);
+                if (!resolved || resolved.skip) continue;
+                state.totalRows += 1;
+                if (resolved.invalid) {
+                    state.invalid.push(resolved.invalid);
+                    state.processed += 1;
+                } else if (resolved.row) {
+                    batch.push(resolved.row);
+                    if (batch.length >= settings.chunkSize) {
+                        enqueueChunk(batch.splice(0, batch.length));
+                    }
+                }
+                updateStats();
+            }
+            if (batch.length) enqueueChunk(batch.splice(0, batch.length));
+            state.sourceDone = true;
+            while (state.queueWaiters.length) {
+                const resolve = state.queueWaiters.shift();
+                resolve();
+            }
+        }
+
+        async function produceFromFile(settings) {
+            const file = state.selectedFile;
+            if (!file) {
+                throw new Error('No uploaded file selected.');
             }
 
-            if (clearLog) {
-                elements.log.innerHTML = '';
+            const resolveRow = settings.inputFormat === 'csv' || (settings.inputFormat === 'auto' && file.name.toLowerCase().endsWith('.csv'))
+                ? makeCsvResolver(settings)
+                : makeLineResolver();
+
+            if (!file.stream) {
+                elements.inputLinks.value = await file.text();
+                return produceFromText(settings);
             }
 
-            elements.startBtn.disabled = false;
-            elements.stopBtn.disabled = true;
-            updateEngineHint();
-            updateStats({ syncText: true });
-            setStatus('Ready. Upload a file or paste owned links/codes, then click “Start processing”.', 'ready');
+            const reader = file.stream().pipeThrough(new TextDecoderStream()).getReader();
+            let buffer = '';
+            const batch = [];
+
+            while (true) {
+                if (state.shouldStop) break;
+                await waitIfPaused();
+                const { value, done } = await reader.read();
+                if (done) break;
+                buffer += value;
+                const lines = buffer.split(/\r?\n/);
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    if (state.shouldStop) break;
+                    await waitIfPaused();
+                    const resolved = resolveRow(line);
+                    if (!resolved || resolved.skip) continue;
+                    state.totalRows += 1;
+                    if (resolved.invalid) {
+                        state.invalid.push(resolved.invalid);
+                        state.processed += 1;
+                    } else if (resolved.row) {
+                        batch.push(resolved.row);
+                        if (batch.length >= settings.chunkSize) {
+                            enqueueChunk(batch.splice(0, batch.length));
+                        }
+                    }
+                }
+                updateStats();
+            }
+
+            if (buffer.trim() && !state.shouldStop) {
+                const resolved = resolveRow(buffer);
+                if (resolved && !resolved.skip) {
+                    state.totalRows += 1;
+                    if (resolved.invalid) {
+                        state.invalid.push(resolved.invalid);
+                        state.processed += 1;
+                    } else if (resolved.row) {
+                        batch.push(resolved.row);
+                    }
+                }
+            }
+
+            if (batch.length) enqueueChunk(batch.splice(0, batch.length));
+            state.sourceDone = true;
+            while (state.queueWaiters.length) {
+                const resolve = state.queueWaiters.shift();
+                resolve();
+            }
         }
 
-        function parseInputRows() {
-            return elements.inputLinks.value
-                .split(/\r?\n|,/)
-                .map((line) => line.trim())
-                .filter(Boolean);
-        }
-
-        async function processQueueParallel() {
-            const mode = MODE_CONFIG[state.modeKey] || MODE_CONFIG.normal;
-            const rows = state.queue;
-            const chunks = splitIntoChunks(rows, mode.chunkSize);
-            const requestedWorkers = clampInt(elements.workerCountInput.value, 1, 16, mode.defaultWorkers);
-            const workerCount = Math.max(1, Math.min(requestedWorkers, chunks.length || 1));
-            const verbose = elements.logModeSelect.value === 'verbose';
-            const summaryStep = Math.max(1, Math.ceil((chunks.length || 1) / 10));
-
+        async function runWorkers(settings) {
+            const workerUrl = buildWorkerUrl();
+            const verbose = settings.logMode === 'verbose';
+            const workerCount = Math.max(1, Math.min(settings.workers, HARDWARE_THREADS));
             state.activeWorkers = workerCount;
             updateEngineHint();
-            updateStats();
-            setStatus(`Processing ${rows.length.toLocaleString()} supplied entries with ${workerCount} parallel worker(s) in ${mode.label.toLowerCase()} profile.`, 'running');
-            log(`Started local processing for ${rows.length.toLocaleString()} row(s) using ${workerCount} worker(s) across ${chunks.length.toLocaleString()} chunk(s).`, 'info');
-
-            const workerUrl = buildWorkerUrl();
-            let nextChunkIndex = 0;
-            let completedChunks = 0;
-            let lastBucketLogged = -1;
-
-            const maybeSyncUi = (force = false) => {
-                const now = performance.now();
-                if (force || (now - state.lastStatsSync) >= UI_SYNC_INTERVAL_MS) {
-                    updateStats();
-                    state.lastStatsSync = now;
-                }
-            };
 
             const runWorker = async (slot) => {
                 const worker = new Worker(workerUrl);
-
                 try {
                     while (!state.shouldStop) {
-                        const chunkIndex = nextChunkIndex;
-                        if (chunkIndex >= chunks.length) break;
-                        nextChunkIndex += 1;
-
-                        const data = await new Promise((resolve, reject) => {
+                        const chunk = await dequeueChunk();
+                        if (!chunk || !chunk.length) return;
+                        const result = await new Promise((resolve, reject) => {
                             worker.onmessage = (event) => resolve(event.data || {});
                             worker.onerror = (event) => reject(new Error(event.message || `Worker ${slot + 1} failed.`));
-                            worker.postMessage({ rows: chunks[chunkIndex], chunkIndex });
+                            worker.postMessage({ rows: chunk });
                         });
-
-                        mergeWorkerResult(data);
-                        completedChunks += 1;
-                        maybeSyncUi();
-
+                        mergeWorkerResult(result);
                         if (verbose) {
-                            log(`Worker ${slot + 1} finished chunk ${chunkIndex + 1}/${chunks.length}.`, 'info');
-                        } else if (completedChunks === chunks.length || completedChunks % summaryStep === 0) {
-                            const bucket = Math.floor((completedChunks / Math.max(1, chunks.length)) * 10);
-                            if (bucket !== lastBucketLogged) {
-                                lastBucketLogged = bucket;
-                                log(`Progress: ${state.processed.toLocaleString()}/${rows.length.toLocaleString()} row(s) processed.`, 'info');
-                            }
+                            log(`Worker ${slot + 1} processed ${chunk.length.toLocaleString()} row(s).`, 'info');
                         }
                     }
                 } finally {
@@ -910,60 +1419,43 @@ AbCdEf1234567890"></textarea>
                 URL.revokeObjectURL(workerUrl);
                 state.activeWorkers = 0;
                 updateEngineHint();
-                updateStats({ syncText: true });
-            }
-
-            if (state.shouldStop) {
-                setStatus(`Stopped after processing ${state.processed.toLocaleString()} of ${rows.length.toLocaleString()} supplied entries.`, 'error');
-                log('Processing stopped by user.', 'warning');
-            } else {
-                setStatus(`Completed local processing of ${rows.length.toLocaleString()} supplied entries.`, 'done');
-                log(`Local processing complete. Valid: ${state.valid.length.toLocaleString()}, duplicates: ${state.duplicates.length.toLocaleString()}, malformed: ${state.invalid.length.toLocaleString()}.`, 'success');
             }
         }
 
-        async function sendWebhookBatches() {
-            if (!elements.webhookEnabled.checked) {
-                return;
-            }
-
-            const url = elements.webhookInput.value.trim();
-            if (!url) {
+        async function sendWebhookBatches(settings) {
+            if (!settings.webhookEnabled) return;
+            if (!settings.webhookUrl) {
                 throw new Error('Webhook is enabled but no webhook URL was provided.');
             }
 
             let parsedUrl;
             try {
-                parsedUrl = new URL(url);
+                parsedUrl = new URL(settings.webhookUrl);
             } catch {
                 throw new Error('Webhook URL is invalid.');
             }
-
             if (parsedUrl.protocol !== 'https:') {
                 throw new Error('Webhook URL must use HTTPS.');
             }
-
             if (!state.valid.length) {
                 log('Webhook enabled, but there were no format-valid entries to send.', 'warning');
                 return;
             }
 
-            const mode = MODE_CONFIG[state.modeKey] || MODE_CONFIG.normal;
-            const batchSize = clampInt(elements.webhookBatchSizeInput.value, 1, 100, mode.webhookBatchSize);
-            const channelCount = clampInt(elements.webhookConcurrencyInput.value, 1, 8, mode.webhookConcurrency);
-            const batches = splitIntoChunks(state.valid, batchSize);
-            const activeChannels = Math.max(1, Math.min(channelCount, batches.length));
-            const verbose = elements.logModeSelect.value === 'verbose';
-            let nextBatchIndex = 0;
+            const batches = [];
+            for (let i = 0; i < state.valid.length; i += settings.webhookBatchSize) {
+                batches.push(state.valid.slice(i, i + settings.webhookBatchSize));
+            }
 
+            const activeChannels = Math.max(1, Math.min(settings.webhookConcurrency, batches.length));
+            let nextBatchIndex = 0;
             log(`Sending ${state.valid.length.toLocaleString()} format-valid entries in ${batches.length.toLocaleString()} batch(es) using ${activeChannels} concurrent webhook channel(s).`, 'info');
 
-            const sendNextBatch = async (slot) => {
+            const sendNext = async (slot) => {
                 while (!state.shouldStop) {
                     const batchIndex = nextBatchIndex;
                     if (batchIndex >= batches.length) return;
                     nextBatchIndex += 1;
-
                     const batch = batches[batchIndex];
                     const payload = {
                         event: 'owned_gift_link_batch',
@@ -973,14 +1465,15 @@ AbCdEf1234567890"></textarea>
                         count: batch.length,
                         entries: batch,
                         summary: {
-                            totalInputRows: state.queue.length,
+                            totalInputRows: state.totalRows,
                             processed: state.processed,
                             validUnique: state.valid.length,
                             duplicates: state.duplicates.length,
                             malformed: state.invalid.length,
-                            mode: state.modeKey,
-                            workersUsed: clampInt(elements.workerCountInput.value, 1, 16, mode.defaultWorkers),
-                            webhookChannels: activeChannels
+                            workersUsed: settings.workers,
+                            chunkSize: settings.chunkSize,
+                            inputFormat: settings.inputFormat,
+                            source: state.usingDirectFile ? 'uploaded file stream' : 'textarea'
                         }
                     };
 
@@ -990,88 +1483,122 @@ AbCdEf1234567890"></textarea>
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify(payload)
                         });
-
                         if (!response.ok) {
                             throw new Error(`HTTP ${response.status}`);
                         }
-
                         state.webhookDeliveries += 1;
-                        if (verbose || batches.length <= 5) {
+                        if (settings.logMode === 'verbose' || batches.length <= 5) {
                             log(`Webhook channel ${slot + 1} sent batch ${batchIndex + 1}/${batches.length}.`, 'success');
                         }
                     } catch (error) {
                         state.webhookFailures += 1;
                         log(`Webhook batch ${batchIndex + 1}/${batches.length} failed: ${error.message}`, 'error');
                     } finally {
-                        updateStats();
+                        updateStats({ force: true });
                     }
                 }
             };
 
-            await Promise.all(Array.from({ length: activeChannels }, (_, index) => sendNextBatch(index)));
-            updateStats({ syncText: true });
-
-            if (state.shouldStop) {
-                log('Webhook delivery halted because processing was stopped.', 'warning');
-                return;
-            }
-
-            if (state.webhookFailures) {
-                setStatus(`Local processing complete. Webhook delivered ${state.webhookDeliveries}/${batches.length} batch(es).`, 'error');
-                log(`Webhook delivery finished with ${state.webhookFailures.toLocaleString()} failed batch(es).`, 'warning');
-            } else {
-                setStatus('Completed local processing and webhook delivery for your supplied entries.', 'done');
-                log('Webhook delivery complete.', 'success');
-            }
+            await Promise.all(Array.from({ length: activeChannels }, (_, index) => sendNext(index)));
+            updateStats({ force: true });
         }
 
         async function startProcessing() {
-            const rows = parseInputRows();
-            if (!rows.length) {
+            if (state.isRunning) return;
+
+            const settings = readSettings();
+            const hasManualInput = Boolean(elements.inputLinks.value.trim());
+            const useDirectFile = Boolean(state.selectedFile && settings.streamFile);
+            if (!useDirectFile && !hasManualInput) {
                 setStatus('Please upload a file or paste at least one owned gift link or code before starting.', 'error');
                 log('Start blocked: no input rows found.', 'error');
                 return;
             }
 
-            resetResults();
-            state.queue = rows;
-            state.modeKey = elements.modeSelect.value;
+            resetProcessingState({ keepInput: true, clearLog: false, clearFile: false });
+            const activeSettings = readSettings();
             state.isRunning = true;
-            state.shouldStop = false;
-            state.lastStatsSync = performance.now();
-
+            state.startedAt = Date.now();
+            state.usingDirectFile = useDirectFile;
             elements.startBtn.disabled = true;
+            elements.pauseBtn.disabled = false;
             elements.stopBtn.disabled = false;
+            startStatsTimer();
             updateEngineHint();
-            updateStats();
+            updateStats({ force: true });
+            setStatus(`Processing started using ${useDirectFile ? 'uploaded file stream' : 'textarea input'} with ${activeSettings.workers} worker(s).`, 'running');
+            log(`Processing started. Source: ${useDirectFile ? 'uploaded file stream' : 'textarea/manual input'}.`, 'info');
 
             try {
-                await processQueueParallel();
+                const producerPromise = useDirectFile ? produceFromFile(activeSettings) : produceFromText(activeSettings);
+                const workerPromise = runWorkers(activeSettings);
+                await Promise.all([producerPromise, workerPromise]);
+                updateStats({ syncText: true, force: true });
 
-                if (!state.shouldStop) {
-                    await sendWebhookBatches();
+                if (state.shouldStop) {
+                    setStatus(`Stopped after processing ${state.processed.toLocaleString()} of ${state.totalRows.toLocaleString()} rows.`, 'error');
+                    log('Processing stopped by user.', 'warning');
+                } else {
+                    log(`Local processing complete. Valid: ${state.valid.length.toLocaleString()}, duplicates: ${state.duplicates.length.toLocaleString()}, malformed: ${state.invalid.length.toLocaleString()}.`, 'success');
+                    setStatus(`Completed local processing of ${state.totalRows.toLocaleString()} rows.`, 'done');
+                    await sendWebhookBatches(activeSettings);
+                    if (activeSettings.webhookEnabled && state.webhookFailures) {
+                        setStatus(`Local processing complete. Webhook delivered ${state.webhookDeliveries}/${Math.ceil(state.valid.length / activeSettings.webhookBatchSize)} batch(es).`, 'error');
+                    } else if (activeSettings.webhookEnabled) {
+                        setStatus('Completed local processing and webhook delivery for your supplied entries.', 'done');
+                    }
                 }
             } catch (error) {
                 console.error(error);
                 setStatus(error.message || 'An unexpected error occurred.', 'error');
                 log(error.message || 'Unexpected error.', 'error');
             } finally {
+                state.sourceDone = true;
                 state.isRunning = false;
+                state.activeWorkers = 0;
+                stopStatsTimer();
                 elements.startBtn.disabled = false;
+                elements.pauseBtn.disabled = true;
+                elements.pauseBtn.textContent = 'Pause';
                 elements.stopBtn.disabled = true;
+                updateStats({ syncText: true, force: true });
                 updateEngineHint();
-                updateStats({ syncText: true });
+                saveSettingsToStorage();
+            }
+        }
+
+        function togglePause() {
+            if (!state.isRunning) return;
+            state.isPaused = !state.isPaused;
+            if (state.isPaused) {
+                elements.pauseBtn.textContent = 'Resume';
+                setStatus('Paused. Resume to continue processing queued rows.', 'paused');
+                log('Processing paused.', 'warning');
+            } else {
+                elements.pauseBtn.textContent = 'Pause';
+                setStatus('Processing resumed.', 'running');
+                log('Processing resumed.', 'info');
+                resolvePauseWaiters();
+                while (state.queueWaiters.length) {
+                    const resolve = state.queueWaiters.shift();
+                    resolve();
+                }
             }
         }
 
         function stopProcessing() {
-            if (!state.isRunning) {
-                return;
-            }
+            if (!state.isRunning) return;
             state.shouldStop = true;
+            state.sourceDone = true;
+            resolvePauseWaiters();
+            while (state.queueWaiters.length) {
+                const resolve = state.queueWaiters.shift();
+                resolve();
+            }
             elements.stopBtn.disabled = true;
-            setStatus('Stopping after active chunks finish...', 'error');
-            log('Stop requested. Waiting for in-flight worker chunks to finish.', 'warning');
+            elements.pauseBtn.disabled = true;
+            setStatus('Stopping after active worker batches finish...', 'error');
+            log('Stop requested. Waiting for in-flight worker batches to finish.', 'warning');
         }
 
         function downloadText(kind) {
@@ -1113,33 +1640,23 @@ AbCdEf1234567890"></textarea>
                 log('Nothing to copy.', 'warning');
                 return;
             }
-
             await navigator.clipboard.writeText(target.value);
             log(`Copied ${targetId} to clipboard.`, 'success');
         }
 
-        async function loadSelectedFile(file) {
+        async function handleSelectedFile(file) {
             if (!file) return;
-
-            const text = await file.text();
-            const roughRows = text.split(/\r?\n|,/).filter(Boolean).length;
-            elements.inputLinks.value = text;
-            elements.fileMeta.textContent = `Loaded file: ${file.name} (${file.size.toLocaleString()} bytes, about ${roughRows.toLocaleString()} rows)`;
-            log(`Loaded ${file.name} into the input area.`, 'info');
-            setStatus(`Loaded ${file.name}. Review the entries, then click “Start processing”.`, 'ready');
+            await inspectSelectedFile(file);
         }
 
-        function applyModeDefaults() {
-            const mode = MODE_CONFIG[elements.modeSelect.value] || MODE_CONFIG.normal;
-            elements.workerCountInput.value = mode.defaultWorkers;
-            elements.webhookConcurrencyInput.value = mode.webhookConcurrency;
-            elements.webhookBatchSizeInput.value = mode.webhookBatchSize;
+        function maybeSaveOnChange() {
             updateEngineHint();
+            saveSettingsToStorage();
         }
 
         elements.fileInput.addEventListener('change', async (event) => {
             const [file] = event.target.files || [];
-            await loadSelectedFile(file);
+            await handleSelectedFile(file);
         });
 
         ['dragenter', 'dragover'].forEach((eventName) => {
@@ -1158,11 +1675,11 @@ AbCdEf1234567890"></textarea>
 
         elements.uploadBox.addEventListener('drop', async (event) => {
             const [file] = event.dataTransfer?.files || [];
-            await loadSelectedFile(file);
+            await handleSelectedFile(file);
         });
 
-        elements.sampleBtn.addEventListener('click', () => {
-            elements.inputLinks.value = [
+        elements.sampleBtn.addEventListener('click', async () => {
+            const sample = [
                 'https://discord.gift/AbCdEf1234567890',
                 'https://discord.com/gifts/QwErTy0987654321',
                 'QwErTy0987654321',
@@ -1170,28 +1687,92 @@ AbCdEf1234567890"></textarea>
                 'bad code',
                 'https://discord.gift/AbCdEf1234567890'
             ].join('\n');
+            state.selectedFile = null;
+            elements.fileInput.value = '';
             elements.fileMeta.textContent = 'Using built-in sample data.';
+            elements.inputLinks.value = sample;
+            await inspectCsvColumnsFromText(sample);
+            updateEngineHint();
+            saveSettingsToStorage();
             log('Sample input loaded.', 'info');
             setStatus('Sample data loaded. Click “Start processing” to test the checker.', 'ready');
         });
 
         elements.clearBtn.addEventListener('click', () => {
+            state.selectedFile = null;
             elements.inputLinks.value = '';
             elements.fileInput.value = '';
             elements.fileMeta.textContent = 'No file loaded yet.';
+            populateCsvColumnOptions([]);
+            updateEngineHint();
+            saveSettingsToStorage();
             log('Input cleared.', 'info');
             setStatus('Ready. Upload a file or paste owned links/codes, then click “Start processing”.', 'ready');
         });
 
-        elements.modeSelect.addEventListener('change', applyModeDefaults);
-        elements.workerCountInput.addEventListener('input', updateEngineHint);
-        elements.webhookConcurrencyInput.addEventListener('input', updateEngineHint);
-        elements.webhookBatchSizeInput.addEventListener('input', updateEngineHint);
+        elements.modeSelect.addEventListener('change', () => {
+            applyProfileDefaults();
+        });
+
+        elements.applyProfileBtn.addEventListener('click', () => {
+            applyProfileDefaults();
+            log('Profile defaults applied.', 'info');
+        });
+
+        elements.saveSettingsBtn.addEventListener('click', () => {
+            saveSettingsToStorage();
+            log('Settings saved in this browser.', 'success');
+        });
+
+        elements.clearSavedBtn.addEventListener('click', () => {
+            clearSavedSettings();
+        });
+
+        elements.inputFormatSelect.addEventListener('change', async () => {
+            await inspectCsvColumnsFromText(elements.inputLinks.value);
+            maybeSaveOnChange();
+        });
+        elements.csvDelimiterSelect.addEventListener('change', async () => {
+            await inspectCsvColumnsFromText(elements.inputLinks.value);
+            maybeSaveOnChange();
+        });
+        elements.csvHeaderCheckbox.addEventListener('change', async () => {
+            await inspectCsvColumnsFromText(elements.inputLinks.value);
+            maybeSaveOnChange();
+        });
+        elements.inputLinks.addEventListener('input', async () => {
+            if (!state.selectedFile || !elements.streamFileCheckbox.checked) {
+                await inspectCsvColumnsFromText(elements.inputLinks.value.slice(0, 50000));
+            }
+            saveSettingsToStorage();
+        });
+
+        [
+            elements.workerCountInput,
+            elements.chunkSizeInput,
+            elements.csvColumnSelect,
+            elements.streamFileCheckbox,
+            elements.rememberSettingsCheckbox,
+            elements.webhookEnabled,
+            elements.webhookInput,
+            elements.webhookConcurrencyInput,
+            elements.webhookBatchSizeInput,
+            elements.logModeSelect
+        ].forEach((el) => el.addEventListener('input', maybeSaveOnChange));
+
+        [
+            elements.csvColumnSelect,
+            elements.streamFileCheckbox,
+            elements.rememberSettingsCheckbox,
+            elements.webhookEnabled,
+            elements.logModeSelect
+        ].forEach((el) => el.addEventListener('change', maybeSaveOnChange));
 
         elements.startBtn.addEventListener('click', startProcessing);
+        elements.pauseBtn.addEventListener('click', togglePause);
         elements.stopBtn.addEventListener('click', stopProcessing);
         elements.resetBtn.addEventListener('click', () => {
-            resetResults({ clearLog: true });
+            resetProcessingState({ keepInput: true, clearLog: true, clearFile: false });
             log('Results reset.', 'info');
         });
 
@@ -1208,10 +1789,16 @@ AbCdEf1234567890"></textarea>
             });
         });
 
-        resetResults({ clearLog: true });
-        applyModeDefaults();
+        const restoredSettings = loadSettingsFromStorage();
+        if (!restoredSettings) {
+            applyProfileDefaults();
+        } else {
+            updateEngineHint();
+        }
+        inspectCsvColumnsFromText(elements.inputLinks.value || '').catch(console.error);
+        resetProcessingState({ keepInput: true, clearLog: true, clearFile: false });
+        updateEngineHint();
         log('Owned Gift Link File Checker loaded. Ready for accelerated local-only file processing.', 'info');
     </script>
-
 </body>
 </html>
