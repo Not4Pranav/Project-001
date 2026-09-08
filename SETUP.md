@@ -40,7 +40,8 @@ Open:
 3. The generated fixture is checked immediately.
 4. The app verifies expected valid, duplicate, and malformed counts.
 5. Click **Generate & self-check now** or **Re-run generated check** to run it again.
-6. Export generated results if needed.
+6. Click **Start continuous loop** to keep generating and checking automatically; press **Stop** to halt it. The run counter and passed/failed counters show how many self-checks completed.
+7. Export generated results if needed.
 
 No user file upload, paste, or external service check is required.
 
@@ -63,6 +64,15 @@ Direct Node command:
 ```bash
 node cli/owned-gift-link-checker.mjs --self-test
 ```
+
+Continuous loop (browser: **Start continuous loop** / **Stop**; CLI: Ctrl+C):
+
+```bash
+node cli/owned-gift-link-checker.mjs --self-test --loop
+node cli/owned-gift-link-checker.mjs --self-test --loop --loop-delay 250
+```
+
+The CLI loop keeps regenerating and re-checking the fixture until you press Ctrl+C, then writes `self-test-loop-report.json` with the total runs and passed/failed counts.
 
 Generated local self-test output is written under `output/self-test` by default. The fixture is generated in memory, then these files are written:
 - `run/valid.txt`

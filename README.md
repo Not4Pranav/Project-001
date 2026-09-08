@@ -25,6 +25,7 @@ Highlights:
 - checks it immediately with browser workers
 - verifies expected valid, duplicate, and malformed results
 - provides a **Generate & self-check now** button to rerun the generated check
+- provides a **Start continuous loop** button that keeps generating and checking until **Stop** is pressed
 - result copy/download buttons for the generated output
 
 ### 2) CLI
@@ -35,6 +36,7 @@ Highlights:
 - `--self-test` explicitly runs the same generated self-check
 - streams the generated fixture in memory, then writes checker outputs, `summary.json`, and `self-test-report.json`
 - exits non-zero if expected counts/files do not match
+- `--loop` keeps regenerating and re-checking the fixture until interrupted (Ctrl+C)
 - keeps all checking local and skips webhooks in self-test mode
 
 ## Speed safeguards
@@ -59,6 +61,8 @@ Then open:
 
 The browser version generates and checks its fixture automatically on load. Click **Generate & self-check now** or **Re-run generated check** to run it again.
 
+For a hands-off soak test, click **Start continuous loop**. The checker then regenerates the synthetic fixture and re-runs the self-check over and over, counting runs and passed/failed results, and only stops when you press **Stop**.
+
 ### CLI
 Generate and check immediately:
 
@@ -77,6 +81,19 @@ Or directly:
 ```bash
 node cli/owned-gift-link-checker.mjs --self-test
 ```
+
+### Continuous loop
+
+Browser: click **Start continuous loop**, then press **Stop** when you want it to halt.
+
+CLI: add `--loop` to `--self-test`. The tool then keeps generating the same deterministic fixture and re-running the local self-check until you interrupt it with **Ctrl+C**.
+
+```bash
+node cli/owned-gift-link-checker.mjs --self-test --loop
+node cli/owned-gift-link-checker.mjs --self-test --loop --loop-delay 250
+```
+
+The loop prints periodic progress (`loop run 25: self-check passed`), keeps going after a failed run, and writes `self-test-loop-report.json` with total runs, passed/failed counts, and elapsed time when it stops. The mode stays inside the same safety boundary: local-only, fixed synthetic fixture, no random or redeemable codes, no network calls or probing.
 
 By default, generated self-test output is written under:
 

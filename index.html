@@ -362,6 +362,7 @@
                 <span class="pill">Local-only format validation</span>
                 <span class="pill">Generated synthetic fixture</span>
                 <span class="pill">Immediate self-check on load</span>
+                <span class="pill">Continuous loop mode</span>
             </div>
             <div>
                 <h1>Generated Gift Link Format Self-Checker</h1>
@@ -394,8 +395,12 @@
                     <input id="fileInput" class="hidden" type="file" accept=".txt,.csv,.log" aria-hidden="true" tabindex="-1" disabled />
                     <button id="sampleBtn" class="ghost-btn hidden" type="button" aria-hidden="true" tabindex="-1">Load sample</button>
                     <button id="selfCheckBtn" class="primary-btn" type="button">Generate &amp; self-check now</button>
+                    <button id="loopBtn" class="success-btn" type="button">Start continuous loop</button>
                     <button id="clearBtn" class="ghost-btn hidden" type="button" aria-hidden="true" tabindex="-1">Clear input</button>
                 </div>
+                <span class="hint" style="margin-top: 10px;">
+                    Continuous loop keeps regenerating the synthetic fixture and re-checking it automatically until you press <strong>Stop</strong>. It only re-runs the local self-check; no random codes, network calls, or external checks are performed.
+                </span>
             </div>
 
             <div class="card">
@@ -552,6 +557,14 @@
                     <div class="label">Elapsed</div>
                     <div class="value muted-text" id="elapsedCount">0s</div>
                 </div>
+                <div class="stat">
+                    <div class="label">Continuous loop runs</div>
+                    <div class="value muted-text" id="loopRunsCount">0</div>
+                </div>
+                <div class="stat">
+                    <div class="label">Loop passed / failed</div>
+                    <div class="value muted-text" id="loopPassFailCount">0 / 0</div>
+                </div>
             </div>
 
             <div class="grid" style="margin-top: 16px; gap: 14px;">
@@ -618,7 +631,7 @@
             <details>
                 <summary>What this tool does and does not do</summary>
                 <div class="grid" style="gap: 10px; margin-top: 12px;">
-                    <p><strong>Does:</strong> generate a fixed local synthetic fixture, validate supported formats, deduplicate, classify malformed rows, process with local workers, and export the generated check results.</p>
+                    <p><strong>Does:</strong> generate a fixed local synthetic fixture, validate supported formats, deduplicate, classify malformed rows, process with local workers, export the generated check results, and optionally run a continuous generate-and-check loop that only stops when you press <strong>Stop</strong>.</p>
                     <p><strong>Does not:</strong> accept user file uploads in the browser UI, generate random or redeemable codes, probe external services, verify redemption status, attempt claims, or discover links.</p>
                 </div>
             </details>
@@ -670,6 +683,7 @@
             fileMeta: document.getElementById('fileMeta'),
             sampleBtn: document.getElementById('sampleBtn'),
             selfCheckBtn: document.getElementById('selfCheckBtn'),
+            loopBtn: document.getElementById('loopBtn'),
             clearBtn: document.getElementById('clearBtn'),
             modeSelect: document.getElementById('modeSelect'),
             inputFormatSelect: document.getElementById('inputFormatSelect'),
@@ -701,6 +715,8 @@
             webhookCount: document.getElementById('webhookCount'),
             rateCount: document.getElementById('rateCount'),
             elapsedCount: document.getElementById('elapsedCount'),
+            loopRunsCount: document.getElementById('loopRunsCount'),
+            loopPassFailCount: document.getElementById('loopPassFailCount'),
             status: document.getElementById('status'),
             progressBar: document.getElementById('progressBar'),
             progressLabel: document.getElementById('progressLabel'),
@@ -736,7 +752,13 @@
             approximateInputRows: 0,
             selectedFilePreviewOnly: false,
             selfCheckActive: false,
-            selfCheckExpected: null
+            selfCheckExpected: null,
+            lastRunResult: null,
+            loopActive: false,
+            loopStopRequested: false,
+            loopRuns: 0,
+            loopPassed: 0,
+            loopFailed: 0
         };
 
         function clampInt(value, min, max, fallback) {
@@ -788,6 +810,10 @@
             elements.progressBar.max = Math.max(1, state.totalRows || 1);
             elements.progressBar.value = Math.min(state.processed, Math.max(1, state.totalRows || 1));
             elements.progressLabel.textContent = `${state.processed.toLocaleString()} / ${state.totalRows.toLocaleString()} processed`;
+
+            elements.loopRunsCount.textContent = state.loopRuns.toLocaleString();
+            elements.loopPassFailCount.textContent = `${state.loopPassed.toLocaleString()} / ${state.loopFailed.toLocaleString()}`;
+            elements.loopPassFailCount.className = `value ${state.loopRuns === 0 ? 'muted-text' : state.loopFailed ? 'warning-text' : 'success-text'}`;
 
             if (syncText) {
                 elements.validOutput.value = state.valid.join('\n');
@@ -899,6 +925,19 @@
             elements.engineHint.textContent = `Detected browser threads: ${HARDWARE_THREADS}. Profile: ${profile.label}. Workers: ${effectiveWorkers}. Chunk size: ${effectiveChunkSize}. Source: ${source}. The generated fixture is checked locally and webhook delivery is skipped. ${profile.note}`;
         }
 
+        function updateLoopUI() {
+            const loopOn = state.loopActive;
+            elements.loopBtn.disabled = loopOn || state.isRunning;
+            elements.loopBtn.textContent = loopOn ? 'Continuous loop running…' : 'Start continuous loop';
+            elements.selfCheckBtn.disabled = loopOn || state.isRunning;
+            elements.startBtn.disabled = loopOn || state.isRunning;
+            elements.stopBtn.disabled = !loopOn && !state.isRunning;
+            elements.resetBtn.disabled = loopOn;
+            if (!state.isRunning) {
+                elements.pauseBtn.disabled = true;
+            }
+        }
+
         function estimateCurrentInputRows(useDirectFile) {
             if (useDirectFile && state.approximateInputRows) {
                 return state.approximateInputRows;
@@ -962,6 +1001,14 @@
             state.approximateInputRows = 0;
             state.selfCheckExpected = preservedSelfCheckExpected;
             state.selfCheckActive = preservedSelfCheckActive;
+            state.lastRunResult = null;
+            if (clearLog) {
+                state.loopRuns = 0;
+                state.loopPassed = 0;
+                state.loopFailed = 0;
+                state.loopActive = false;
+                state.loopStopRequested = false;
+            }
             if (clearFile) {
                 state.selectedFilePreviewOnly = false;
             }
@@ -987,7 +1034,10 @@
             elements.stopBtn.disabled = true;
             updateStats({ syncText: true, force: true });
             updateEngineHint();
-            setStatus('Ready. Click “Generate & self-check now” or “Re-run generated check” to create and verify the fixture again.', 'ready');
+            updateLoopUI();
+            if (!state.loopActive) {
+                setStatus('Ready. Click “Generate & self-check now” or “Start continuous loop” to create and verify the fixture.', 'ready');
+            }
         }
 
         function isValidCodeFast(value) {
@@ -1691,6 +1741,7 @@
 
         async function startProcessing() {
             if (state.isRunning) return;
+            state.lastRunResult = null;
 
             const pendingSelfCheck = state.selfCheckExpected;
             const pendingSelfCheckActive = state.selfCheckActive;
@@ -1754,7 +1805,7 @@
             state.isRunning = true;
             state.startedAt = Date.now();
             state.usingDirectFile = useDirectFile;
-            elements.startBtn.disabled = true;
+            updateLoopUI();
             elements.pauseBtn.disabled = false;
             elements.stopBtn.disabled = false;
             startStatsTimer();
@@ -1764,8 +1815,10 @@
             const activeSource = state.selfCheckActive
                 ? 'generated self-check fixture'
                 : useDirectFile ? 'uploaded file stream' : 'textarea/manual input';
-            setStatus(`Processing started using ${activeSource} with ${activeSettings.workers} worker(s).`, 'running');
-            log(`Processing started. Source: ${activeSource}. Estimated rows: ${estimatedRows.toLocaleString() || 'unknown'}.`, 'info');
+            if (!state.loopActive) {
+                setStatus(`Processing started using ${activeSource} with ${activeSettings.workers} worker(s).`, 'running');
+                log(`Processing started. Source: ${activeSource}. Estimated rows: ${estimatedRows.toLocaleString() || 'unknown'}.`, 'info');
+            }
 
             try {
                 const producerPromise = useDirectFile ? produceFromFile(activeSettings) : produceFromText(activeSettings);
@@ -1774,31 +1827,44 @@
                 updateStats({ syncText: true, force: true });
 
                 if (state.shouldStop) {
-                    setStatus(`Stopped after processing ${state.processed.toLocaleString()} of ${state.totalRows.toLocaleString()} rows.`, 'error');
-                    log('Processing stopped by user.', 'warning');
+                    state.lastRunResult = 'stopped';
+                    if (!state.loopActive) {
+                        setStatus(`Stopped after processing ${state.processed.toLocaleString()} of ${state.totalRows.toLocaleString()} rows.`, 'error');
+                        log('Processing stopped by user.', 'warning');
+                    }
                 } else {
-                    log(`Local processing complete. Valid: ${state.valid.length.toLocaleString()}, duplicates: ${state.duplicates.length.toLocaleString()}, malformed: ${state.invalid.length.toLocaleString()}.`, 'success');
-                    setStatus(`Completed local processing of ${state.totalRows.toLocaleString()} rows.`, 'done');
+                    state.lastRunResult = 'done';
+                    if (!state.loopActive) {
+                        log(`Local processing complete. Valid: ${state.valid.length.toLocaleString()}, duplicates: ${state.duplicates.length.toLocaleString()}, malformed: ${state.invalid.length.toLocaleString()}.`, 'success');
+                        setStatus(`Completed local processing of ${state.totalRows.toLocaleString()} rows.`, 'done');
+                    }
                     await sendWebhookBatches(activeSettings);
-                    if (activeSettings.webhookEnabled && state.webhookFailures) {
+                    if (!state.loopActive && activeSettings.webhookEnabled && state.webhookFailures) {
                         setStatus(`Local processing complete. Webhook delivered ${state.webhookDeliveries}/${Math.ceil(state.valid.length / activeSettings.webhookBatchSize)} batch(es).`, 'error');
-                    } else if (activeSettings.webhookEnabled) {
+                    } else if (!state.loopActive && activeSettings.webhookEnabled) {
                         setStatus('Completed local processing and webhook delivery for your supplied entries.', 'done');
                     }
 
                     if (state.selfCheckExpected) {
                         const selfCheck = validateSyntheticSelfCheck();
                         if (selfCheck.passed) {
-                            log('Generated self-check passed: expected valid, duplicate, and malformed counts matched.', 'success');
-                            setStatus('Generated self-check passed. The local checker matched all expected results.', 'done');
+                            state.lastRunResult = 'passed';
+                            if (!state.loopActive) {
+                                log('Generated self-check passed: expected valid, duplicate, and malformed counts matched.', 'success');
+                                setStatus('Generated self-check passed. The local checker matched all expected results.', 'done');
+                            }
                         } else {
+                            state.lastRunResult = 'failed';
                             selfCheck.mismatches.forEach((mismatch) => log(`Self-check mismatch: ${mismatch}`, 'error'));
-                            setStatus('Generated self-check failed. Review the log for mismatched counts.', 'error');
+                            if (!state.loopActive) {
+                                setStatus('Generated self-check failed. Review the log for mismatched counts.', 'error');
+                            }
                         }
                     }
                 }
             } catch (error) {
                 console.error(error);
+                state.lastRunResult = 'error';
                 setStatus(error.message || 'An unexpected error occurred.', 'error');
                 log(error.message || 'Unexpected error.', 'error');
             } finally {
@@ -1806,12 +1872,11 @@
                 state.isRunning = false;
                 state.activeWorkers = 0;
                 stopStatsTimer();
-                elements.startBtn.disabled = false;
                 elements.pauseBtn.disabled = true;
                 elements.pauseBtn.textContent = 'Pause';
-                elements.stopBtn.disabled = true;
                 updateStats({ syncText: true, force: true });
                 updateEngineHint();
+                updateLoopUI();
                 saveSettingsToStorage();
             }
         }
@@ -1836,6 +1901,24 @@
         }
 
         function stopProcessing() {
+            if (state.loopActive) {
+                if (state.loopStopRequested) return;
+                state.loopStopRequested = true;
+                if (state.isRunning) {
+                    state.shouldStop = true;
+                    state.sourceDone = true;
+                    resolvePauseWaiters();
+                    while (state.queueWaiters.length) {
+                        const resolve = state.queueWaiters.shift();
+                        resolve();
+                    }
+                }
+                elements.stopBtn.disabled = true;
+                elements.pauseBtn.disabled = true;
+                setStatus('Stopping continuous loop after the active run finishes...', 'error');
+                log('Stop requested: continuous loop will halt after the current generated check finishes.', 'warning');
+                return;
+            }
             if (!state.isRunning) return;
             state.shouldStop = true;
             state.sourceDone = true;
@@ -1967,8 +2050,9 @@
             setStatus('Sample data loaded. Click “Start processing” to test the checker.', 'ready');
         });
 
-        async function runGeneratedSelfCheck({ automatic = false } = {}) {
+        async function runGeneratedSelfCheck({ automatic = false, loopIteration = false } = {}) {
             if (state.isRunning) return;
+            const quiet = automatic || loopIteration;
             const fixture = buildSyntheticSelfCheckFixture();
             state.selectedFile = null;
             state.selectedFilePreviewOnly = false;
@@ -1982,10 +2066,95 @@
             await inspectCsvColumnsFromText(fixture.text);
             updateEngineHint();
             saveSettingsToStorage();
-            log(`${automatic ? 'Auto-generated' : 'Generated'} synthetic self-check fixture. Starting local validation immediately; webhook delivery is skipped.`, 'info');
-            setStatus('Generated self-check fixture. Starting local validation...', 'running');
+            if (!quiet) {
+                log(`${automatic ? 'Auto-generated' : 'Generated'} synthetic self-check fixture. Starting local validation immediately; webhook delivery is skipped.`, 'info');
+                setStatus('Generated self-check fixture. Starting local validation...', 'running');
+            }
             await startProcessing();
         }
+
+        const LOOP_INTER_RUN_DELAY_MS = 120;
+
+        function waitLoopDelay(delayMs) {
+            return new Promise((resolve) => {
+                const startedAt = Date.now();
+                const timer = setInterval(() => {
+                    if (state.loopStopRequested || !state.loopActive || Date.now() - startedAt >= delayMs) {
+                        clearInterval(timer);
+                        resolve();
+                    }
+                }, 50);
+            });
+        }
+
+        async function runContinuousLoop() {
+            if (state.isRunning || state.loopActive) return;
+
+            state.loopActive = true;
+            state.loopStopRequested = false;
+            state.loopRuns = 0;
+            state.loopPassed = 0;
+            state.loopFailed = 0;
+
+            const fixture = buildSyntheticSelfCheckFixture();
+            log(`Continuous loop started: regenerating the ${fixture.rows.length.toLocaleString()}-line synthetic fixture and self-checking it repeatedly until Stop is pressed. No network calls are made.`, 'success');
+            setStatus('Continuous loop running — generating and self-checking the fixture...', 'running');
+            updateStats({ force: true });
+            updateLoopUI();
+
+            try {
+                while (!state.loopStopRequested) {
+                    state.loopRuns += 1;
+                    const runNumber = state.loopRuns;
+                    setStatus(`Continuous loop running — generated self-check run ${runNumber.toLocaleString()}...`, 'running');
+                    updateStats({ force: true });
+
+                    state.lastRunResult = null;
+                    await runGeneratedSelfCheck({ loopIteration: true });
+
+                    if (state.loopStopRequested) break;
+
+                    const result = state.lastRunResult || 'skipped';
+                    if (result === 'passed' || result === 'done') {
+                        state.loopPassed += 1;
+                        if (state.loopRuns % 25 === 0) {
+                            log(`Continuous loop: ${state.loopRuns.toLocaleString()} runs completed so far — all self-checks passed (valid, duplicate, and malformed counts matched).`, 'success');
+                        }
+                    } else if (result === 'stopped') {
+                        log(`Continuous loop run ${runNumber.toLocaleString()} was stopped mid-check; halting the loop.`, 'warning');
+                        break;
+                    } else {
+                        state.loopFailed += 1;
+                        const reason = result === 'skipped' ? 'the run did not execute' : `result: ${result}`;
+                        log(`Continuous loop run ${runNumber.toLocaleString()} failed (${reason}). The loop keeps going; press Stop to halt.`, 'error');
+                    }
+                    updateStats({ syncText: true, force: true });
+
+                    await waitLoopDelay(LOOP_INTER_RUN_DELAY_MS);
+                }
+            } catch (error) {
+                console.error(error);
+                state.loopFailed += 1;
+                log(`Continuous loop error: ${error.message || error}`, 'error');
+            } finally {
+                state.loopActive = false;
+                state.loopStopRequested = false;
+                updateStats({ syncText: true, force: true });
+                updateLoopUI();
+                log(`Continuous loop stopped after ${state.loopRuns.toLocaleString()} run(s): ${state.loopPassed.toLocaleString()} passed, ${state.loopFailed.toLocaleString()} failed.`, 'warning');
+                setStatus(`Continuous loop stopped after ${state.loopRuns.toLocaleString()} run(s) — ${state.loopPassed.toLocaleString()} passed, ${state.loopFailed.toLocaleString()} failed.`, 'done');
+            }
+        }
+
+        elements.loopBtn.addEventListener('click', () => {
+            runContinuousLoop().catch((error) => {
+                console.error(error);
+                state.loopActive = false;
+                updateLoopUI();
+                setStatus(error.message || 'Continuous loop failed to start.', 'error');
+                log(error.message || 'Continuous loop failed to start.', 'error');
+            });
+        });
 
         elements.selfCheckBtn.addEventListener('click', () => {
             runGeneratedSelfCheck().catch((error) => {
@@ -2080,6 +2249,11 @@
         elements.pauseBtn.addEventListener('click', togglePause);
         elements.stopBtn.addEventListener('click', stopProcessing);
         elements.resetBtn.addEventListener('click', () => {
+            if (state.loopActive || state.isRunning) {
+                stopProcessing();
+                log('Reset requested: stopping the continuous loop first. Press “Reset generated results” again once it halts to clear counters.', 'warning');
+                return;
+            }
             resetProcessingState({ keepInput: true, clearLog: true, clearFile: false });
             log('Results reset.', 'info');
         });

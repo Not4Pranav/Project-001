@@ -48,6 +48,25 @@ You can also run the CLI entry without any input flags; it defaults to generated
 node cli/owned-gift-link-checker.mjs
 ```
 
+## Continuous loop mode
+
+Use `--loop` with `--self-test` to keep regenerating the deterministic synthetic fixture and re-running the local self-check in an endless loop. It stops only when you interrupt it with **Ctrl+C** (the browser UI equivalent is **Start continuous loop** / **Stop**).
+
+```bash
+node cli/owned-gift-link-checker.mjs --self-test --loop
+node cli/owned-gift-link-checker.mjs --self-test --loop --loop-delay 250
+```
+
+- `--loop` — keep generating and checking until interrupted; requires `--self-test`
+- `--loop-delay <ms>` — pause between runs, `0`-`60000` (default: `100`)
+
+Behaviour:
+- progress lines are printed periodically (`loop run 25: self-check passed`) instead of one line per run
+- a failed run is logged and the loop keeps going; press Ctrl+C to stop
+- on stop it writes `self-test-loop-report.json` next to `self-test-report.json` with total runs, passed/failed counts, elapsed time, runs/minute, and the last run's report
+- pressing Ctrl+C again before the active run finishes exits immediately with code `130`
+- safety boundary is unchanged: local-only, fixed synthetic fixture, no random/redeemable codes, no network calls, no probing, no webhooks
+
 ## Performance safeguards
 
 Generated self-check mode is intentionally lightweight:
@@ -70,6 +89,7 @@ The fixture itself is generated in memory for speed. Files created after checkin
 - `run/invalid.txt` — generated malformed/unsupported rows
 - `run/summary.json` — normal checker summary
 - `self-test-report.json` — expected-vs-actual verification report
+- `self-test-loop-report.json` — totals for `--loop` mode (written when the loop stops)
 
 Use a custom output directory:
 
@@ -135,6 +155,8 @@ Useful options for explicit local input modes:
 - `--shard-size 1000000`
 - `--include "**/*.csv,**/*.txt.gz"`
 - `--exclude "**/archive/**,*backup*"`
+- `--loop` (requires `--self-test`)
+- `--loop-delay 250`
 - `--quiet`
 
 Webhook options remain ignored in generated self-test mode so the generated fixture is never sent anywhere.

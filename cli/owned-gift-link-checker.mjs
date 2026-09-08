@@ -67,6 +67,7 @@ Optional local input modes still only normalize, validate format, deduplicate, a
 Usage:
   node cli/owned-gift-link-checker.mjs
   node cli/owned-gift-link-checker.mjs --self-test [options]
+  node cli/owned-gift-link-checker.mjs --self-test --loop [options]
   node cli/owned-gift-link-checker.mjs --input ./codes.txt [options]
   node cli/owned-gift-link-checker.mjs --input ./codes.txt.gz --gzip auto [options]
   node cli/owned-gift-link-checker.mjs --input-dir ./incoming [options]
@@ -108,12 +109,22 @@ Optional:
   --webhook-batch-size <n>         Entries per webhook batch (default from profile)
   --quiet                          Less console output
   --keep-temp                      Keep temp partition files
+  --loop                           With --self-test: keep regenerating and re-checking the
+                                   synthetic fixture until stopped (Ctrl+C in the CLI)
+  --loop-delay <ms>                Pause between --loop runs, 0-60000 (default: 100)
   --help                           Show this help
 
 Self-test:
   --self-test creates a deterministic local fixture with valid-looking test entries,
   duplicates, invalid rows, and a blank line, runs the checker, and writes
   <output-dir>/self-test-report.json. It never calls external services.
+
+Continuous loop:
+  --self-test --loop keeps generating the same deterministic fixture and re-running the
+  local self-check in an endless loop. It stops only when you interrupt it (Ctrl+C), so
+  the checker never halts on its own. Progress lines and a run counter are printed as it
+  goes, and <output-dir>/self-test-loop-report.json is written when the loop stops.
+  This mode is local-only: no random codes, no network calls, no probing.
 
 Outputs:
   <output-dir>/valid*.txt or valid*.jsonl (optionally .gz)
@@ -150,6 +161,8 @@ function parseArgs(argv) {
     shardSize: 0,
     quiet: false,
     keepTemp: false,
+    loop: false,
+    loopDelay: 100,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -271,6 +284,13 @@ function parseArgs(argv) {
       case '--keep-temp':
         args.keepTemp = true;
         break;
+      case '--loop':
+        args.loop = true;
+        break;
+      case '--loop-delay':
+        args.loopDelay = Number.parseInt(next, 10);
+        index += 1;
+        break;
       default:
         if (token.startsWith('-')) {
           throw new Error(`Unknown argument: ${token}`);
@@ -340,6 +360,8 @@ function resolveSettings(rawArgs) {
     webhookBatchSize: clampInt(rawArgs.webhookBatchSize, 1, 5_000, profile.webhookBatchSize),
     buckets: clampInt(rawArgs.buckets, 8, 1_024, profile.buckets || DEFAULT_BUCKETS),
     shardSize: clampInt(rawArgs.shardSize, 0, 5_000_000, 0),
+    loop: Boolean(rawArgs.loop),
+    loopDelay: clampInt(rawArgs.loopDelay, 0, 60_000, 100),
   };
 
   if ([settings.stdin, explicitFileInput, Boolean(settings.inputDir), settings.selfTest].filter(Boolean).length !== 1) {
@@ -368,6 +390,10 @@ function resolveSettings(rawArgs) {
 
   if (settings.resume && settings.selfTest) {
     throw new Error('--resume is not supported with --self-test');
+  }
+
+  if (settings.loop && !settings.selfTest) {
+    throw new Error('--loop is only supported with --self-test (the generated synthetic fixture mode)');
   }
 
   if (settings.webhookUrl && !settings.selfTest) {
@@ -1934,6 +1960,107 @@ async function runSelfTest(settings) {
   return report;
 }
 
+function sleepInterruptible(delayMs, isStopping) {
+  if (delayMs <= 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      if (isStopping() || Date.now() - startedAt >= delayMs) {
+        clearInterval(timer);
+        resolve();
+      }
+    }, 25);
+  });
+}
+
+async function runSelfTestLoop(settings) {
+  const logger = createLogger(settings.quiet);
+  const loopReportFile = path.join(settings.outputDir, 'self-test-loop-report.json');
+  const startedAt = Date.now();
+
+  let stopRequested = false;
+  let runs = 0;
+  let passed = 0;
+  let failed = 0;
+  let lastReport = null;
+
+  const requestStop = (signal) => {
+    if (stopRequested) {
+      logger.warn(`received second ${signal}; exiting immediately`);
+      process.exit(130);
+    }
+    stopRequested = true;
+    logger.warn(`${signal} received; finishing the active self-check run, then stopping the loop`);
+  };
+
+  const onSigint = () => requestStop('SIGINT (Ctrl+C)');
+  const onSigterm = () => requestStop('SIGTERM');
+  process.on('SIGINT', onSigint);
+  process.on('SIGTERM', onSigterm);
+
+  logger.info('continuous loop started: regenerating the synthetic fixture and re-running the local self-check until you stop it (Ctrl+C)');
+  logger.info('continuous loop is local-only: no random codes, no network calls, no probing');
+
+  try {
+    while (!stopRequested) {
+      runs += 1;
+      const runStartedAt = Date.now();
+      try {
+        lastReport = await runSelfTest({ ...settings, quiet: true });
+        passed += 1;
+        if (runs === 1 || runs % 25 === 0) {
+          logger.info(`loop run ${runs.toLocaleString()}: self-check passed (${humanDuration(Date.now() - runStartedAt)})`);
+        }
+      } catch (error) {
+        failed += 1;
+        logger.error(`loop run ${runs.toLocaleString()} failed: ${error.message}`);
+        logger.error('loop keeps running after a failed run; press Ctrl+C to stop');
+      }
+
+      if (stopRequested) break;
+      await sleepInterruptible(settings.loopDelay, () => stopRequested);
+    }
+  } finally {
+    process.off('SIGINT', onSigint);
+    process.off('SIGTERM', onSigterm);
+
+    const elapsedMs = Date.now() - startedAt;
+    const loopReport = {
+      mode: 'self-test-loop',
+      stoppedBy: stopRequested ? 'user interrupt' : 'loop exit',
+      runs,
+      passed,
+      failed,
+      elapsedMs,
+      elapsedHuman: humanDuration(elapsedMs),
+      runsPerMinute: elapsedMs > 0 ? Number(((runs / elapsedMs) * 60_000).toFixed(2)) : 0,
+      loopDelayMs: settings.loopDelay,
+      lastRunReport: lastReport,
+      generatedAt: new Date().toISOString(),
+      safety: {
+        localOnly: true,
+        syntheticFixture: true,
+        randomCodes: false,
+        redeemableCodes: false,
+        networkCalls: false,
+        probing: false,
+      },
+    };
+
+    try {
+      await fsp.writeFile(loopReportFile, `${JSON.stringify(loopReport, null, 2)}\n`, 'utf8');
+      logger.info(`loop stopped: runs=${runs.toLocaleString()} passed=${passed.toLocaleString()} failed=${failed.toLocaleString()} in ${loopReport.elapsedHuman}`);
+      logger.info(`loop report written to ${loopReportFile}`);
+    } catch (error) {
+      logger.warn(`could not write loop report: ${error.message}`);
+    }
+
+    if (failed > 0) {
+      throw new Error(`Self-test loop finished with ${failed.toLocaleString()} failed run(s)`);
+    }
+  }
+}
+
 async function processDirectory(settings) {
   const logger = createLogger(settings.quiet);
   const discoveredFiles = await collectFilesRecursive(settings.inputDir);
@@ -2091,7 +2218,11 @@ async function main() {
   const settings = resolveSettings(rawArgs);
 
   if (settings.selfTest) {
-    await runSelfTest(settings);
+    if (settings.loop) {
+      await runSelfTestLoop(settings);
+    } else {
+      await runSelfTest(settings);
+    }
   } else if (settings.inputDir) {
     await processDirectory(settings);
   } else {
