@@ -758,7 +758,8 @@
             loopStopRequested: false,
             loopRuns: 0,
             loopPassed: 0,
-            loopFailed: 0
+            loopFailed: 0,
+            loopFailureStreak: 0
         };
 
         function clampInt(value, min, max, fallback) {
@@ -874,6 +875,13 @@
             if (includeDraft && typeof settings.manualDraft === 'string' && !state.selectedFile) {
                 elements.inputLinks.value = settings.manualDraft;
             }
+        }
+
+        function shouldPersistSettingsNow() {
+            // In continuous-loop mode the settings never change after the first run,
+            // so skip the localStorage write on later runs instead of serializing
+            // them several times per second for as long as the loop runs.
+            return !(state.loopActive && state.loopRuns > 1);
         }
 
         function saveSettingsToStorage() {
@@ -1006,6 +1014,7 @@
                 state.loopRuns = 0;
                 state.loopPassed = 0;
                 state.loopFailed = 0;
+                state.loopFailureStreak = 0;
                 state.loopActive = false;
                 state.loopStopRequested = false;
             }
@@ -1855,7 +1864,15 @@
                             }
                         } else {
                             state.lastRunResult = 'failed';
-                            selfCheck.mismatches.forEach((mismatch) => log(`Self-check mismatch: ${mismatch}`, 'error'));
+                            // During a continuous loop a persistent failure would otherwise
+                            // write mismatch lines several times per second, so only the first
+                            // failure and every 25th consecutive failure are logged in full.
+                            const mismatchVerbose = !state.loopActive
+                                || state.loopFailureStreak === 0
+                                || state.loopFailureStreak % LOOP_LOG_EVERY === 0;
+                            if (mismatchVerbose) {
+                                selfCheck.mismatches.forEach((mismatch) => log(`Self-check mismatch: ${mismatch}`, 'error'));
+                            }
                             if (!state.loopActive) {
                                 setStatus('Generated self-check failed. Review the log for mismatched counts.', 'error');
                             }
@@ -1877,7 +1894,9 @@
                 updateStats({ syncText: true, force: true });
                 updateEngineHint();
                 updateLoopUI();
-                saveSettingsToStorage();
+                if (shouldPersistSettingsNow()) {
+                    saveSettingsToStorage();
+                }
             }
         }
 
@@ -2065,7 +2084,9 @@
             elements.inputLinks.value = fixture.text;
             await inspectCsvColumnsFromText(fixture.text);
             updateEngineHint();
-            saveSettingsToStorage();
+            if (shouldPersistSettingsNow()) {
+                saveSettingsToStorage();
+            }
             if (!quiet) {
                 log(`${automatic ? 'Auto-generated' : 'Generated'} synthetic self-check fixture. Starting local validation immediately; webhook delivery is skipped.`, 'info');
                 setStatus('Generated self-check fixture. Starting local validation...', 'running');
@@ -2074,6 +2095,8 @@
         }
 
         const LOOP_INTER_RUN_DELAY_MS = 120;
+        const LOOP_LOG_EVERY = 25;
+        const MAX_CONSECUTIVE_LOOP_ERRORS = 5;
 
         function waitLoopDelay(delayMs) {
             return new Promise((resolve) => {
@@ -2095,14 +2118,32 @@
             state.loopRuns = 0;
             state.loopPassed = 0;
             state.loopFailed = 0;
+            state.loopFailureStreak = 0;
+            let consecutiveErrors = 0;
+            let haltReason = '';
 
-            const fixture = buildSyntheticSelfCheckFixture();
-            log(`Continuous loop started: regenerating the ${fixture.rows.length.toLocaleString()}-line synthetic fixture and self-checking it repeatedly until Stop is pressed. No network calls are made.`, 'success');
-            setStatus('Continuous loop running — generating and self-checking the fixture...', 'running');
-            updateStats({ force: true });
-            updateLoopUI();
+            // Infrastructure problems (thrown errors, or a run that reported an error)
+            // are not check results: the loop keeps going, but stops if they repeat so
+            // the page cannot sit in a silent error spin.
+            const registerInfraError = (message) => {
+                state.loopFailed += 1;
+                consecutiveErrors += 1;
+                log(`Continuous loop run ${state.loopRuns.toLocaleString()} failed with an unexpected error: ${message}. The loop keeps going; press Stop to halt.`, 'error');
+                if (consecutiveErrors >= MAX_CONSECUTIVE_LOOP_ERRORS) {
+                    haltReason = 'repeated unexpected errors';
+                    log(`Continuous loop is stopping after ${consecutiveErrors} consecutive unexpected errors. Fix the problem, then start the loop again.`, 'error');
+                    return true;
+                }
+                return false;
+            };
 
             try {
+                const fixture = buildSyntheticSelfCheckFixture();
+                log(`Continuous loop started: regenerating the ${fixture.rows.length.toLocaleString()}-line synthetic fixture and self-checking it repeatedly until Stop is pressed. No network calls are made.`, 'success');
+                setStatus('Continuous loop running — generating and self-checking the fixture...', 'running');
+                updateStats({ force: true });
+                updateLoopUI();
+
                 while (!state.loopStopRequested) {
                     state.loopRuns += 1;
                     const runNumber = state.loopRuns;
@@ -2110,23 +2151,45 @@
                     updateStats({ force: true });
 
                     state.lastRunResult = null;
-                    await runGeneratedSelfCheck({ loopIteration: true });
+                    let runError = null;
+                    try {
+                        await runGeneratedSelfCheck({ loopIteration: true });
+                    } catch (error) {
+                        runError = error;
+                    }
 
                     if (state.loopStopRequested) break;
 
-                    const result = state.lastRunResult || 'skipped';
-                    if (result === 'passed' || result === 'done') {
-                        state.loopPassed += 1;
-                        if (state.loopRuns % 25 === 0) {
-                            log(`Continuous loop: ${state.loopRuns.toLocaleString()} runs completed so far — all self-checks passed (valid, duplicate, and malformed counts matched).`, 'success');
+                    if (runError) {
+                        if (registerInfraError(runError.message || runError)) {
+                            break;
                         }
-                    } else if (result === 'stopped') {
-                        log(`Continuous loop run ${runNumber.toLocaleString()} was stopped mid-check; halting the loop.`, 'warning');
-                        break;
+                    } else if (state.lastRunResult === 'error') {
+                        if (registerInfraError('the previous run reported an error in the log above')) {
+                            break;
+                        }
                     } else {
-                        state.loopFailed += 1;
-                        const reason = result === 'skipped' ? 'the run did not execute' : `result: ${result}`;
-                        log(`Continuous loop run ${runNumber.toLocaleString()} failed (${reason}). The loop keeps going; press Stop to halt.`, 'error');
+                        consecutiveErrors = 0;
+                        const result = state.lastRunResult || 'skipped';
+                        if (result === 'passed' || result === 'done') {
+                            state.loopPassed += 1;
+                            state.loopFailureStreak = 0;
+                            if (state.loopRuns % LOOP_LOG_EVERY === 0) {
+                                log(`Continuous loop: ${state.loopRuns.toLocaleString()} runs completed so far — all self-checks passed (valid, duplicate, and malformed counts matched).`, 'success');
+                            }
+                        } else if (result === 'stopped') {
+                            log(`Continuous loop run ${runNumber.toLocaleString()} was stopped mid-check; halting the loop.`, 'warning');
+                            break;
+                        } else {
+                            // A failed self-check is a real result: keep checking so the
+                            // mismatch stays visible until the user presses Stop.
+                            state.loopFailed += 1;
+                            state.loopFailureStreak += 1;
+                            if (state.loopFailureStreak === 1 || state.loopFailureStreak % LOOP_LOG_EVERY === 0) {
+                                const reason = result === 'skipped' ? 'the run did not execute' : 'the expected valid, duplicate, and malformed counts did not match';
+                                log(`Continuous loop run ${runNumber.toLocaleString()} failed because ${reason}. The loop keeps going; press Stop to halt.`, 'error');
+                            }
+                        }
                     }
                     updateStats({ syncText: true, force: true });
 
@@ -2141,8 +2204,9 @@
                 state.loopStopRequested = false;
                 updateStats({ syncText: true, force: true });
                 updateLoopUI();
-                log(`Continuous loop stopped after ${state.loopRuns.toLocaleString()} run(s): ${state.loopPassed.toLocaleString()} passed, ${state.loopFailed.toLocaleString()} failed.`, 'warning');
-                setStatus(`Continuous loop stopped after ${state.loopRuns.toLocaleString()} run(s) — ${state.loopPassed.toLocaleString()} passed, ${state.loopFailed.toLocaleString()} failed.`, 'done');
+                const haltSuffix = haltReason ? ` (${haltReason})` : '';
+                log(`Continuous loop stopped after ${state.loopRuns.toLocaleString()} run(s): ${state.loopPassed.toLocaleString()} passed, ${state.loopFailed.toLocaleString()} failed${haltSuffix}.`, 'warning');
+                setStatus(`Continuous loop stopped after ${state.loopRuns.toLocaleString()} run(s) — ${state.loopPassed.toLocaleString()} passed, ${state.loopFailed.toLocaleString()} failed${haltSuffix}.`, haltReason ? 'error' : 'done');
             }
         }
 

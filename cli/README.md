@@ -62,7 +62,8 @@ node cli/owned-gift-link-checker.mjs --self-test --loop --loop-delay 250
 
 Behaviour:
 - progress lines are printed periodically (`loop run 25: self-check passed`) instead of one line per run
-- a failed run is logged and the loop keeps going; press Ctrl+C to stop
+- a failed self-check is a result, not a reason to quit: the loop keeps checking until interrupted, with mismatch details throttled to the first failure and every 25th
+- an unexpected error (for example an unwritable output directory) is retried, but 5 consecutive unexpected errors stop the loop with a clear message instead of spinning silently
 - on stop it writes `self-test-loop-report.json` next to `self-test-report.json` with total runs, passed/failed counts, elapsed time, runs/minute, and the last run's report
 - pressing Ctrl+C again before the active run finishes exits immediately with code `130`
 - safety boundary is unchanged: local-only, fixed synthetic fixture, no random/redeemable codes, no network calls, no probing, no webhooks

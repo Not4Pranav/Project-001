@@ -72,7 +72,7 @@ node cli/owned-gift-link-checker.mjs --self-test --loop
 node cli/owned-gift-link-checker.mjs --self-test --loop --loop-delay 250
 ```
 
-The CLI loop keeps regenerating and re-checking the fixture until you press Ctrl+C, then writes `self-test-loop-report.json` with the total runs and passed/failed counts.
+The CLI loop keeps regenerating and re-checking the fixture until you press Ctrl+C, then writes `self-test-loop-report.json` with the total runs and passed/failed counts. Failed self-checks are logged and the loop keeps going (throttled to the first failure and every 25th); only five consecutive *unexpected* errors stop the loop early, so it cannot spin silently on a broken environment.
 
 Generated local self-test output is written under `output/self-test` by default. The fixture is generated in memory, then these files are written:
 - `run/valid.txt`

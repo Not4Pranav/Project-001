@@ -95,6 +95,10 @@ node cli/owned-gift-link-checker.mjs --self-test --loop --loop-delay 250
 
 The loop prints periodic progress (`loop run 25: self-check passed`), keeps going after a failed run, and writes `self-test-loop-report.json` with total runs, passed/failed counts, and elapsed time when it stops. The mode stays inside the same safety boundary: local-only, fixed synthetic fixture, no random or redeemable codes, no network calls or probing.
 
+Two behaviours worth knowing:
+- A failed self-check is treated as a result, not a reason to quit: the loop keeps checking and the mismatch stays visible until you stop it. Log details are throttled (first failure, then every 25th) so a persistent failure cannot flood the log or console.
+- An unexpected error (for example an unwritable output directory) is retried, but if it repeats 5 runs in a row the loop halts with a clear message instead of spinning silently. Fix the cause, then start the loop again.
+
 By default, generated self-test output is written under:
 
 ```text

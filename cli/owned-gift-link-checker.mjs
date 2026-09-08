@@ -1898,8 +1898,8 @@ async function buildSelfTestReport(summary, expected, fixtureSource, outputDir) 
   };
 }
 
-async function runSelfTest(settings) {
-  const logger = createLogger(settings.quiet);
+async function runSelfTest(settings, loggerOverride = null) {
+  const logger = loggerOverride || createLogger(settings.quiet);
   const fixture = makeSyntheticSelfCheckFixture();
   await ensureDir(settings.outputDir);
 
@@ -1953,12 +1953,17 @@ async function runSelfTest(settings) {
     for (const mismatch of report.mismatches) {
       logger.error(`self-test mismatch: ${mismatch}`);
     }
-    throw new Error('Self-test failed');
+    const failure = new Error('Self-test failed');
+    failure.code = 'SELF_TEST_FAILED';
+    failure.mismatches = report.mismatches;
+    throw failure;
   }
 
   logger.info(`self-test passed; report written to ${reportFile}`);
   return report;
 }
+
+const MAX_CONSECUTIVE_LOOP_ERRORS = 5;
 
 function sleepInterruptible(delayMs, isStopping) {
   if (delayMs <= 0) return Promise.resolve();
@@ -1979,10 +1984,27 @@ async function runSelfTestLoop(settings) {
   const startedAt = Date.now();
 
   let stopRequested = false;
+  let stopReason = 'loop exit';
   let runs = 0;
   let passed = 0;
   let failed = 0;
+  let consecutiveFailures = 0;
+  let consecutiveErrors = 0;
   let lastReport = null;
+
+  // Self-test failures are expected to repeat while the checker is broken, so full
+  // mismatch details are printed on the first failure and every 25th one; the runs in
+  // between run with a silent logger instead of flooding the console.
+  const quietLogger = createLogger(true);
+  const silentLogger = {
+    quiet: true,
+    info() {},
+    warn() {},
+    error() {},
+    progress() {},
+    stopProgress() {},
+    clearProgress() {},
+  };
 
   const requestStop = (signal) => {
     if (stopRequested) {
@@ -1990,6 +2012,7 @@ async function runSelfTestLoop(settings) {
       process.exit(130);
     }
     stopRequested = true;
+    stopReason = 'user interrupt';
     logger.warn(`${signal} received; finishing the active self-check run, then stopping the loop`);
   };
 
@@ -2000,21 +2023,58 @@ async function runSelfTestLoop(settings) {
 
   logger.info('continuous loop started: regenerating the synthetic fixture and re-running the local self-check until you stop it (Ctrl+C)');
   logger.info('continuous loop is local-only: no random codes, no network calls, no probing');
+  if (settings.quiet) {
+    logger.warn('--quiet suppresses the per-run progress lines; the loop is still running, press Ctrl+C to stop it');
+  }
+  if (settings.webhookUrl) {
+    logger.warn('self-test ignores webhook options, so the generated fixture is never sent anywhere');
+  }
 
   try {
     while (!stopRequested) {
       runs += 1;
       const runStartedAt = Date.now();
+      const verboseFailure = consecutiveFailures === 0 || consecutiveFailures % 25 === 0;
+      const runLogger = verboseFailure ? quietLogger : silentLogger;
       try {
-        lastReport = await runSelfTest({ ...settings, quiet: true });
+        // webhookUrl is dropped for the same reason runSelfTest ignores it: the loop
+        // would otherwise re-log that warning on every single run.
+        lastReport = await runSelfTest({ ...settings, quiet: true, webhookUrl: null }, runLogger);
         passed += 1;
+        consecutiveFailures = 0;
+        consecutiveErrors = 0;
         if (runs === 1 || runs % 25 === 0) {
           logger.info(`loop run ${runs.toLocaleString()}: self-check passed (${humanDuration(Date.now() - runStartedAt)})`);
         }
       } catch (error) {
         failed += 1;
-        logger.error(`loop run ${runs.toLocaleString()} failed: ${error.message}`);
-        logger.error('loop keeps running after a failed run; press Ctrl+C to stop');
+        if (error.code === 'SELF_TEST_FAILED') {
+          // A failed self-check is a real result, so keep checking until interrupted.
+          consecutiveFailures += 1;
+          consecutiveErrors = 0;
+          if (consecutiveFailures === 1 || consecutiveFailures % 25 === 0) {
+            logger.error(`loop run ${runs.toLocaleString()} failed: expected valid, duplicate, and malformed counts did not match`);
+            if (!verboseFailure) {
+              for (const mismatch of error.mismatches || []) {
+                logger.error(`loop run ${runs.toLocaleString()} mismatch: ${mismatch}`);
+              }
+            }
+            logger.error('loop keeps running after a failed run; press Ctrl+C to stop');
+          }
+        } else {
+          // Infrastructure errors are not check results: keep going, but halt if the
+          // same class of problem keeps repeating instead of spinning forever.
+          consecutiveErrors += 1;
+          consecutiveFailures = 0;
+          logger.error(`loop run ${runs.toLocaleString()} failed with an unexpected error: ${error.message}`);
+          if (consecutiveErrors >= MAX_CONSECUTIVE_LOOP_ERRORS) {
+            stopRequested = true;
+            stopReason = 'repeated unexpected errors';
+            logger.error(`stopping the loop after ${consecutiveErrors} consecutive unexpected errors`);
+            break;
+          }
+          logger.error('loop keeps running after the error; press Ctrl+C to stop');
+        }
       }
 
       if (stopRequested) break;
@@ -2027,7 +2087,7 @@ async function runSelfTestLoop(settings) {
     const elapsedMs = Date.now() - startedAt;
     const loopReport = {
       mode: 'self-test-loop',
-      stoppedBy: stopRequested ? 'user interrupt' : 'loop exit',
+      stoppedBy: stopReason,
       runs,
       passed,
       failed,
